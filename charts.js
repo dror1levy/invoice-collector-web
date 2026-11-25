@@ -15,9 +15,15 @@ function el(name, attrs = {}, parent) {
 const shortDate = (iso) => `${iso.slice(8, 10)}/${iso.slice(5, 7)}/${iso.slice(2, 4)}`;
 
 function axisNumber(v) {
-  if (Math.abs(v) >= 10000) return Math.round(v / 1000).toLocaleString('en-US') + 'K';
+  if (Math.abs(v) >= 10000) return (+(v / 1000).toFixed(1)).toLocaleString('en-US') + 'K';
   if (Math.abs(v) >= 100 || Number.isInteger(v)) return Math.round(v).toLocaleString('en-US');
-  return v.toFixed(1);
+  return String(+v.toFixed(2));
+}
+
+function niceStep(raw) {
+  const p = 10 ** Math.floor(Math.log10(raw));
+  const f = raw / p;
+  return (f <= 1 ? 1 : f <= 2 ? 2 : f <= 2.5 ? 2.5 : f <= 5 ? 5 : 10) * p;
 }
 
 /**
@@ -42,15 +48,18 @@ export function timeChart(container, points, { mark = 'bars', format = String, f
     const values = points.map((p) => p.value);
     const lo = fromZero ? Math.min(0, ...values) : Math.min(...values);
     const hi = Math.max(...values);
-    const pad = hi > lo ? (hi - lo) * 0.15 : Math.max(Math.abs(hi) * 0.1, 1);
-    const yMin = fromZero ? lo : Math.max(0, lo - pad), yMax = hi + pad;
+    // Round axis values (0, 500, 1,000…), not fractions of the data range.
+    const step = niceStep(hi > lo ? (hi - lo) / 3 : Math.max(Math.abs(hi) * 0.1, 1));
+    let yMin = fromZero ? Math.floor(lo / step) * step : Math.max(0, Math.floor(lo / step) * step);
+    let yMax = Math.ceil(hi / step) * step;
+    if (!fromZero && yMin === lo && yMin > 0) yMin = Math.max(0, yMin - step);
+    if (yMax === hi && (!fromZero || hi === yMin)) yMax += step;
     const t0 = Date.parse(points[0].date), t1 = Date.parse(points[points.length - 1].date);
     const span = Math.max(0, t1 - t0);
     const x = (iso) => (span === 0 ? (left + right) / 2 : left + ((right - left) * (Date.parse(iso) - t0)) / span);
     const y = (v) => bottom - ((bottom - top) * (v - yMin)) / (yMax - yMin);
 
-    for (let k = 0; k <= 2; k++) {
-      const v = yMin + ((yMax - yMin) * k) / 2;
+    for (let v = yMin; v <= yMax + step / 1000; v += step) {
       el('line', { x1: left, x2: right, y1: y(v), y2: y(v), class: 'grid' }, svg);
       el('text', { x: left - 6, y: y(v) + 4, 'text-anchor': 'end', class: 'tick' }, svg).textContent = axisNumber(v);
     }

@@ -26,11 +26,12 @@ function h(tag, attrs = {}, ...children) {
     else if (k.startsWith('on')) n.addEventListener(k.slice(2), v);
     else n.setAttribute(k, v === true ? '' : v);
   }
-  for (const c of children.flat()) if (c != null && c !== false) n.append(c instanceof Node ? c : String(c));
+  for (const c of children.flat(Infinity)) if (c != null && c !== false) n.append(c instanceof Node ? c : String(c));
   return n;
 }
 const ltr = (t) => h('bdi', { dir: 'ltr' }, t);
-const money = (v) => (v == null ? '—' : '₪' + v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
+const billing = (d) => { const t = displayPeriod(d.billing_start, d.billing_end); return t && ltr(t); };
+const money = (v) => (v == null ? '—' : (v < 0 ? '-₪' : '₪') + Math.abs(v).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
 const qty = (q) => (Number.isInteger(q) ? q.toLocaleString('en-US') : q.toLocaleString('en-US', { maximumFractionDigits: 2 }));
 const pct = (p) => (p > 0 ? '+' : '') + p.toFixed(1) + '%';
 
@@ -47,7 +48,7 @@ const kpis = (items) => h('div', { class: 'kpis' }, items.filter(Boolean).map(([
 function changePill(p) {
   if (p == null) return null;
   if (Math.abs(p) < 0.05) return pill('ללא שינוי');
-  return p > 0 ? pill(['▲ ', ltr(pct(p))].join(''), 'danger') : pill('▼ ' + pct(p), 'success');
+  return p > 0 ? h('span', { class: 'pill danger' }, '▲ ', ltr(pct(p))) : h('span', { class: 'pill success' }, '▼ ', ltr(pct(p)));
 }
 
 // VAT display: amounts are stored before VAT; with the switch on they are shown with VAT of their date.
@@ -142,7 +143,7 @@ function topBar(active) {
 }
 
 function page(active, title, subtitle, sticky, ...body) {
-  return [topBar(active), sticky ? h('div', { class: 'sticky' }, sticky) : null,
+  return [h('div', { class: 'head' }, topBar(active), sticky ? h('div', { class: 'sticky' }, sticky) : null),
     h('main', {}, title ? h('div', { class: 'title' }, h('h1', {}, title), subtitle ? h('p', {}, subtitle) : null) : null, ...body)];
 }
 
@@ -188,7 +189,7 @@ function periodView(folder) {
       h('summary', {}, h('span', { class: 'row-title' }, c.item.title),
         !c.linked ? pill('לא משויך ספק', 'warning') : c.complete ? pill(`${c.found} מתוך ${c.item.expectedPerPeriod}`, 'success') : pill(`${c.found} מתוך ${c.item.expectedPerPeriod}`, 'danger')),
       mine.map((d) => h('a', { class: 'row sub', href: `#/doc/${d.id}` },
-        h('div', { class: 'row-main' }, displayPeriod(d.billing_start, d.billing_end) ?? displayDate(d.invoice_date) ?? d.file_name,
+        h('div', { class: 'row-main' }, ltr(displayPeriod(d.billing_start, d.billing_end) ?? displayDate(d.invoice_date) ?? d.file_name),
           h('div', { class: 'muted' }, displayPeriod(d.billing_start, d.billing_end) ? 'תקופת חשבון' : 'תאריך חשבונית')),
         h('div', { class: 'amount' }, money(d.total)))));
   })));
@@ -217,7 +218,7 @@ function docView(id) {
     h('div', { class: 'split' }, preview, h('div', {},
       card('פרטי החשבונית',
         field('ספק', d.supplier_name), field('ח.פ / עוסק', d.supplier_tax_id && ltr(d.supplier_tax_id)), field('סוג מסמך', DOC_TYPE[d.doc_type] ?? d.doc_type),
-        field('מספר', d.invoice_number && ltr(d.invoice_number)), field('תאריך', displayDate(d.invoice_date)), field('תקופת חשבון', displayPeriod(d.billing_start, d.billing_end)),
+        field('מספר', d.invoice_number && ltr(d.invoice_number)), field('תאריך', displayDate(d.invoice_date)), field('תקופת חשבון', billing(d)),
         field('תיאור', d.description), field('לפני מע״מ', d.amount_before_vat != null ? money(d.amount_before_vat) : null), field('מע״מ', d.vat_amount != null ? money(d.vat_amount) : null),
         field('סה״כ', d.total != null ? money(d.total) : null), field('קבוצה', d.group ? `${d.group.title} (${KIND_LABEL[d.group.kind]})` : d.invoice_id != null ? 'לא משויך' : null),
         d.issues.length ? field('לבדיקה', d.issues.join(', ')) : null, field('קובץ', ltr(d.file_name)),
@@ -366,6 +367,17 @@ function render() {
     view = errorView('שגיאה בהצגת הדף: ' + e.message);
   }
   show(...[view].flat().filter(Boolean));
+  watchHead();
+}
+
+// The sticky file preview sits under the header, whatever its height.
+let headObserver;
+function watchHead() {
+  const head = document.querySelector('.head');
+  headObserver?.disconnect();
+  if (!head) return;
+  headObserver = new ResizeObserver(() => document.documentElement.style.setProperty('--head', head.offsetHeight + 'px'));
+  headObserver.observe(head);
 }
 
 window.addEventListener('hashchange', () => { render(); window.scrollTo(0, 0); });
