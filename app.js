@@ -135,7 +135,7 @@ function welcome() {
 }
 
 function topBar(active) {
-  const fresh = state.backupTime ? `נתונים מ-${new Date(state.backupTime).toLocaleString('he-IL', { dateStyle: 'short', timeStyle: 'short' })}` : '';
+  const fresh = state.backupTime ? `${state.source === 'dev' ? 'עותק בדיקה מקומי, ' : ''}נתונים מ-${new Date(state.backupTime).toLocaleString('he-IL', { dateStyle: 'short', timeStyle: 'short' })}` : '';
   return h('header', { class: 'top' },
     h('div', { class: 'brand' }, h('a', { href: '#/' }, 'איסוף חשבוניות'), h('span', { class: 'fresh' }, fresh)),
     h('nav', {}, h('a', { href: '#/', class: active === 'invoices' ? 'on' : '' }, 'חשבוניות'), h('a', { href: '#/products', class: active === 'products' ? 'on' : '' }, 'ספקים ומוצרים')),
@@ -383,7 +383,11 @@ function watchHead() {
 window.addEventListener('hashchange', () => { render(); window.scrollTo(0, 0); });
 // Local testing only: http://localhost:<port>/?dev opens a copy of the database next to the page.
 if (['localhost', '127.0.0.1'].includes(location.hostname) && new URLSearchParams(location.search).has('dev')) {
-  fetch('dev.db').then((r) => r.arrayBuffer()).then((b) => open(new Uint8Array(b), 'file', new Date().toISOString()));
+  // The copy's own time (not "now"), so an old copy doesn't look up to date.
+  fetch('dev.db', { cache: 'no-store' }).then(async (r) => {
+    const time = new Date(r.headers.get('Last-Modified') ?? Date.now()).toISOString();
+    await open(new Uint8Array(await r.arrayBuffer()), 'dev', time);
+  });
 } else {
   render();
 }
