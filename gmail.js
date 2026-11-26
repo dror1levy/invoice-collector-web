@@ -12,11 +12,24 @@ const IMAGE_TYPES = { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', w
 const has = (s, w) => String(s ?? '').toLowerCase().includes(w.toLowerCase());
 
 // --- GmailSearch.kt ---
-/** Emails received in the period's months that mention an invoice (with or without a file). */
+/** Days after the period's end still searched: an invoice of the last days is often emailed a bit later. */
+export const EXTRA_DAYS = 15;
+
+/** The day after the period ends (YYYY-MM-DD). */
+export function periodEnd(period) {
+  return new Date(Date.UTC(period.year, period.end, 1)).toISOString().slice(0, 10);
+}
+
+/**
+ * Emails that mention an invoice (with or without a file), received from the period's first day
+ * until EXTRA_DAYS after it ends. An invoice dated after the period is moved to its own period
+ * once read (see the page).
+ */
 export function query(period) {
-  const d = (y, m) => `${y}/${String(m).padStart(2, '0')}/01`;
-  const endY = period.end === 12 ? period.year + 1 : period.year, endM = period.end === 12 ? 1 : period.end + 1;
-  return `{חשבונית invoice} after:${d(period.year, period.start)} before:${d(endY, endM)} -from:me -in:sent -in:drafts`;
+  const d = (iso) => iso.replace(/-/g, '/');
+  const start = `${period.year}-${String(period.start).padStart(2, '0')}-01`;
+  const until = new Date(Date.parse(periodEnd(period)) + EXTRA_DAYS * 86400000).toISOString().slice(0, 10);
+  return `{חשבונית invoice} after:${d(start)} before:${d(until)} -from:me -in:sent -in:drafts`;
 }
 
 // --- core/Files.kt ---

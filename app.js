@@ -1,14 +1,14 @@
 // The desktop web view of the app: reads the phone's database backup from Google Drive (view
 // only) and shows the periods, invoices and the suppliers & products dashboard.
-import { CONFIG } from './config.js?v=8';
-import { Data } from './data.js?v=8';
-import { timeChart } from './charts.js?v=8';
-import { account, matchAll, merge, parseStatement } from './card.js?v=8';
-import { GMAIL_SCOPE, findInvoices } from './gmail.js?v=8';
+import { CONFIG } from './config.js?v=9';
+import { Data } from './data.js?v=9';
+import { timeChart } from './charts.js?v=9';
+import { account, matchAll, merge, parseStatement } from './card.js?v=9';
+import { EXTRA_DAYS, GMAIL_SCOPE, findInvoices, periodEnd } from './gmail.js?v=9';
 import {
   ALL_KINDS, EXCLUDED, FIXED, OCCASIONAL, PRODUCTS, RUNNING, cumulative, displayDate, displayPeriod, parsePeriod,
   quantityByMonth, sameDayTogether, withVat,
-} from './logic.js?v=8';
+} from './logic.js?v=9';
 
 const SQL_JS = 'https://cdn.jsdelivr.net/npm/sql.js@1.10.3/dist/';
 const DRIVE = 'https://www.googleapis.com/drive/v3/files';
@@ -727,6 +727,8 @@ async function searchGmail(periodKey) {
       if (seen.has(it.hash)) { it.repeat = true; repeats++; }
       seen.add(it.hash);
     }
+    const end = Date.parse(periodEnd(period));
+    found.items.forEach((i) => { i.late = i.received >= end; });
     g.result = { items: found.items.filter((i) => !i.repeat), ignored: found.ignored + repeats };
     g.picked = new Set(g.result.items.filter((i) => i.bytes && !i.exists && !i.locked));
   } catch (e) {
@@ -752,7 +754,7 @@ function gmailView(chosen) {
   };
   const head = card(null, h('div', { class: 'toolbar' }, h('label', { class: 'muted' }, 'תקופה: '), select,
     h('button', { class: 'primary', disabled: g.busy || null, onclick: start }, g.result && g.period === period ? 'חפש שוב' : 'חפש חשבוניות במייל')),
-  h('p', { class: 'note' }, 'מיילים שהתקבלו בחודשי התקופה ומזכירים חשבונית: קבצים מצורפים, וגם חשבוניות שנשלחו כקישור להורדה. הגישה למייל היא לקריאה בלבד.'),
+  h('p', { class: 'note' }, `מיילים שמזכירים חשבונית, שהתקבלו מתחילת התקופה ועד ${EXTRA_DAYS} יום אחרי סופה: קבצים מצורפים, וגם חשבוניות שנשלחו כקישור להורדה. חשבונית שהתאריך שלה אחרי התקופה מועברת אחרי הקריאה לתקופה שלה. הגישה למייל היא לקריאה בלבד.`),
   !canRead ? h('p', { class: 'note' }, 'בפעם הראשונה Google תבקש לאשר לאתר לקרוא את המייל. אם יופיע מסך שהאפליקציה לא אומתה, זה תקין: לוחצים "המשך".') : null,
   g.busy ? h('div', { class: 'toolbar' }, h('div', { class: 'spinner small' }), h('span', {}, g.progress?.[1] ? `קורא מיילים… ${g.progress[0]} מתוך ${g.progress[1]}` : 'מחפש במייל…')) : null,
   g.error ? h('p', { class: 'error' }, g.error) : null);
@@ -767,6 +769,7 @@ function gmailView(chosen) {
     check ? h('input', { type: 'checkbox', checked: g.picked.has(i) || null, onchange: (e) => { e.target.checked ? g.picked.add(i) : g.picked.delete(i); render(); } }) : null,
     h('div', { class: 'row-main' }, h('div', { class: 'row-title' }, i.linkOnly ? i.name : ltr(i.name)),
       h('div', { class: 'muted' }, [new Date(i.received).toLocaleDateString('he-IL'), i.from.replace(/<.*>/, '').replace(/"/g, '').trim(), i.subject].filter(Boolean).join(' · '))),
+    i.late ? pill('התקבל אחרי סוף התקופה', 'neutral') : null,
     i.link && !i.linkOnly ? pill('מקישור', 'info') : null,
     i.linkOnly ? h('a', { class: 'text', href: i.link, target: '_blank', rel: 'noopener noreferrer' }, 'פתח קישור ↗') : null);
   const section = (title, list, tone, check, explain) => list.length ? card(null, h('div', { class: 'period-head' }, h('h2', {}, title), pill(String(list.length), tone)),
@@ -797,7 +800,7 @@ async function loadPending() {
   if (!state.token || !state.data) return;
   try {
     const known = new Set(state.data.documents().map((d) => d.drive_file_id));
-    const files = (await driveList("appProperties has { key='app' and value='invoice-collector' } and trashed=false", 'id,name,mimeType,appProperties,createdTime'))
+    const files = (await driveList("appProperties has { key='app' and value='invoice-collector' } and trashed=false", 'id,name,mimeType,appProperties,createdTime,parents'))
       .filter((f) => !known.has(f.id));
     const ids = new Set(files.map((f) => f.id));
     const sidecars = (await driveList("appProperties has { key='role' and value='reading' } and trashed=false", 'id,appProperties'))
@@ -836,12 +839,37 @@ async function readPending(ids) {
       if (!r.ok) throw new Error(body.error ?? `שגיאה ${r.status}`);
       state.pending?.readings.set(id, body);
       state.reading.delete(id);
+      await placeByDate(id, body).catch((e) => console.warn('move', e));
     } catch (e) {
       state.reading.set(id, 'הקריאה נכשלה: ' + e.message);
     }
     render();
   };
   await Promise.all(Array.from({ length: 2 }, async () => { while (queue.length) await one(queue.shift()); }));
+}
+
+/**
+ * An invoice can't be reported before its date: one dated after the period it was put in (e.g.
+ * emailed in the first days of the next period) moves to its own period, before the phone takes it.
+ */
+async function placeByDate(id, reading) {
+  const f = state.pending?.files.find((x) => x.id === id);
+  const e = reading.extraction ?? {};
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(e.invoice_date ?? '');
+  if (!f || e.is_invoice === false || !m) return;
+  const target = periodOfDate(new Date(+m[1], +m[2] - 1, +m[3]));
+  const current = f.appProperties?.period;
+  if (!current || target <= current) return;
+  const p = parsePeriod(target);
+  const to = await folder(p.label, await folder(String(p.year), await folder('חשבוניות', 'root')));
+  const from = (f.parents ?? []).join(',');
+  const r = await fetch(`${DRIVE}/${id}?addParents=${to}${from ? '&removeParents=' + from : ''}&fields=id,parents,appProperties`, {
+    method: 'PATCH', headers: { Authorization: 'Bearer ' + state.token, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ appProperties: { period: target } }) });
+  if (!r.ok) throw new Error(`Drive ${r.status}`);
+  Object.assign(f, await r.json());
+  f.movedFrom = current;
+  render();
 }
 
 /** What the server read from a file, in one line; or its reading status. */
@@ -852,7 +880,13 @@ function readingLine(id) {
   const e = r.extraction ?? {};
   return h('div', { class: 'reading' },
     e.is_invoice === false ? pill('לא חשבונית מס', 'warning') : pill(DOC_TYPE[e.doc_type] ?? 'נקרא', 'success'),
-    h('span', {}, [e.supplier_name, displayDate(e.invoice_date), e.total != null ? money(e.total) : null, e.description].filter(Boolean).join(' · ')));
+    h('span', {}, [e.supplier_name, displayDate(e.invoice_date), e.total != null ? money(e.total) : null, e.description].filter(Boolean).join(' · ')),
+    movedNote(id));
+}
+
+function movedNote(id) {
+  const f = state.pending?.files.find((x) => x.id === id);
+  return f?.movedFrom ? pill(`הועברה לתקופה ${parsePeriod(f.appProperties.period)?.label} לפי תאריך החשבונית`, 'info') : null;
 }
 
 function pendingCard(folder) {
