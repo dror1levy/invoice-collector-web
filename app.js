@@ -1,12 +1,13 @@
 // The desktop web view of the app: reads the phone's database backup from Google Drive (view
 // only) and shows the periods, invoices and the suppliers & products dashboard.
-import { CONFIG } from './config.js?v=4';
-import { Data } from './data.js?v=4';
-import { timeChart } from './charts.js?v=4';
+import { CONFIG } from './config.js?v=5';
+import { Data } from './data.js?v=5';
+import { timeChart } from './charts.js?v=5';
+import { account, matchAll, merge, parseStatement } from './card.js?v=5';
 import {
   ALL_KINDS, EXCLUDED, FIXED, OCCASIONAL, PRODUCTS, RUNNING, cumulative, displayDate, displayPeriod, parsePeriod,
   quantityByMonth, sameDayTogether, withVat,
-} from './logic.js?v=4';
+} from './logic.js?v=5';
 
 const SQL_JS = 'https://cdn.jsdelivr.net/npm/sql.js@1.10.3/dist/';
 const DRIVE = 'https://www.googleapis.com/drive/v3/files';
@@ -194,7 +195,8 @@ function topBar(active) {
   const fresh = state.backupTime ? `${state.source === 'dev' ? 'עותק בדיקה מקומי, ' : ''}נתונים מ-${new Date(state.backupTime).toLocaleString('he-IL', { dateStyle: 'short', timeStyle: 'short' })}` : '';
   return h('header', { class: 'top' },
     h('div', { class: 'brand' }, h('a', { href: '#/' }, 'איסוף חשבוניות'), h('span', { class: 'fresh' }, fresh)),
-    h('nav', {}, h('a', { href: '#/', class: active === 'invoices' ? 'on' : '' }, 'חשבוניות'), h('a', { href: '#/products', class: active === 'products' ? 'on' : '' }, 'ספקים ומוצרים')),
+    h('nav', {}, h('a', { href: '#/', class: active === 'invoices' ? 'on' : '' }, 'חשבוניות'), h('a', { href: '#/products', class: active === 'products' ? 'on' : '' }, 'ספקים ומוצרים'),
+      h('a', { href: '#/card', class: active === 'card' ? 'on' : '' }, 'כרטיס אשראי')),
     ['drive', 'cache'].includes(state.source) ? h('div', { class: 'top-actions' },
       h('button', { class: 'text', onclick: () => (state.token ? loadFromDrive() : signIn()), title: 'טען שוב את הגיבוי מ-Drive' }, 'רענן'),
       h('button', { class: 'text', onclick: signOut, title: 'התנתק ומחק את הנתונים מהדפדפן הזה' }, 'התנתק')) : null);
@@ -209,6 +211,7 @@ function page(active, title, subtitle, sticky, ...body) {
 function homeView() {
   const periods = state.data.periods();
   return page('invoices', 'תקופות דיווח', null, null,
+    h('div', { class: 'toolbar' }, h('a', { class: 'button tonal', href: '#/upload' }, '⬆ העלאת חשבוניות')),
     h('div', { class: 'grid' }, periods.map((p) => h('a', { class: 'card link period', href: `#/period/${p.folder_name}` },
       h('div', { class: 'period-head' }, h('h2', {}, ltr(p.period?.label ?? p.folder_name)), h('span', { class: 'muted' }, p.period?.year ?? '')),
       h('div', { class: 'big' }, money(p.total)),
@@ -254,6 +257,10 @@ function periodView(folder) {
 
   return page('invoices', `תקופה ${p.period?.label ?? folder}`, String(p.period?.year ?? ''), null,
     h('section', { class: 'card hero' }, kpis([['סה״כ', money(p.total)], ['לפני מע״מ', money(p.beforeVat)], ['מע״מ', money(p.vat)], ['חשבוניות', String(p.count)]])),
+    h('div', { class: 'toolbar' },
+      h('a', { class: 'button tonal', href: `#/upload?period=${folder}` }, '⬆ העלאת חשבוניות לתקופה'),
+      h('a', { class: 'button tonal', href: `#/card/${folder}` }, 'הצלבה מול כרטיס אשראי'),
+      h('button', { class: 'button tonal', onclick: () => exportPeriod(p) }, '⬇ ייצוא ל-Excel')),
     fixed,
     section('לבדיקה', docs.filter((d) => d.status === 'needs_review' || d.status === 'failed'), 'danger'),
     section('נקראו', docs.filter((d) => d.status === 'extracted' || d.status === 'confirmed'), 'neutral', true),
@@ -349,6 +356,7 @@ function productsView(query = '') {
       ['ספקים', String(suppliers.length)], ['מוצרים', String(suppliers.reduce((s, x) => s + x.products.length, 0))],
       ['סה״כ רכישות מאז ומעולם', money(suppliers.reduce((s, x) => s + (state.vat ? x.totalWithVat : x.totalBeforeVat), 0))],
       ['חשבוניות', String(suppliers.reduce((s, x) => s + x.invoices.length, 0))]])),
+    h('div', { class: 'toolbar' }, h('button', { class: 'button tonal', onclick: () => exportCatalog(suppliers) }, '⬇ ייצוא ספקים ומוצרים ל-Excel')),
     search, results);
 }
 
@@ -407,6 +415,264 @@ function productView(groupId, key) {
         h('td', {}, b.quantity == null ? '' : qty(b.quantity)), h('td', {}, money(shown(b.unitPrice, b.date))), h('td', {}, money(shown(b.amount, b.date))))))), vatNote()));
 }
 
+// --- Excel (SheetJS, loaded only when needed) ------------------------------------------------
+let xlsxLoading;
+function loadXlsx() {
+  xlsxLoading ??= new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = 'https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js';
+    s.onload = () => resolve(window.XLSX);
+    s.onerror = () => { xlsxLoading = null; reject(new Error('לא הצלחתי לטעון את רכיב ה-Excel')); };
+    document.head.appendChild(s);
+  });
+  return xlsxLoading;
+}
+
+async function saveWorkbook(fileName, sheets) {
+  const XLSX = await loadXlsx();
+  const wb = XLSX.utils.book_new();
+  wb.Workbook = { Views: [{ RTL: true }] };
+  for (const [name, rows] of sheets) {
+    const ws = XLSX.utils.aoa_to_sheet(rows);
+    ws['!cols'] = rows[0].map((_, c) => ({ wch: Math.min(45, Math.max(8, ...rows.map((r) => String(r[c] ?? '').length + 2))) }));
+    XLSX.utils.book_append_sheet(wb, ws, name);
+  }
+  XLSX.writeFile(wb, fileName);
+}
+
+function exportPeriod(p) {
+  const docs = [...p.documents].sort((a, b) => (a.invoice_date ?? '').localeCompare(b.invoice_date ?? ''));
+  const rows = [['סטטוס', 'ספק', 'ח.פ / עוסק', 'סוג מסמך', 'מספר', 'תאריך', 'תקופת חשבון', 'תיאור', 'קבוצה', 'סוג הוצאה', 'לפני מע״מ', 'מע״מ', 'סה״כ', 'קובץ', 'קישור']];
+  for (const d of docs) {
+    rows.push([STATUS[d.status] ?? d.status, d.supplier_name ?? '', d.supplier_tax_id ?? '', DOC_TYPE[d.doc_type] ?? d.doc_type ?? '', d.invoice_number ?? '',
+      displayDate(d.invoice_date) ?? '', displayPeriod(d.billing_start, d.billing_end) ?? '', d.description ?? '', d.group?.title ?? '', d.group ? KIND_LABEL[d.group.kind] ?? '' : '',
+      d.amount_before_vat ?? '', d.vat_amount ?? '', d.total ?? '', d.file_name, `https://drive.google.com/file/d/${d.drive_file_id}/view`]);
+  }
+  saveWorkbook(`חשבוניות ${p.period?.year ?? ''} ${p.period?.label ?? p.folder_name}.xlsx`, [['חשבוניות', rows]]).catch((e) => alertBox(e.message));
+}
+
+function exportCatalog(suppliers) {
+  const sRows = [['ספק', 'חשבוניות', 'סה״כ לפני מע״מ', 'סה״כ כולל מע״מ', 'מוצרים', 'קנייה ראשונה', 'קנייה אחרונה']];
+  const pRows = [['ספק', 'מוצר', 'ברקוד / מק״ט', 'קניות', 'סה״כ יחידות', 'מחיר אחרון ליח׳ (לפני מע״מ)', 'שינוי אחרון %', 'קנייה אחרונה', 'סה״כ רכישות (לפני מע״מ)']];
+  for (const s of suppliers) {
+    sRows.push([s.title, s.invoices.length, +s.totalBeforeVat.toFixed(2), +s.totalWithVat.toFixed(2), s.products.length, displayDate(s.firstPurchase) ?? '', displayDate(s.lastPurchase) ?? '']);
+    for (const p of s.products) {
+      const spent = p.purchases.reduce((t, b) => t + (b.amount ?? 0), 0);
+      pRows.push([s.title, p.name, p.sku ?? '', p.purchaseCount, p.totalQuantity, p.lastPrice ?? '', p.lastChangePercent == null ? '' : +p.lastChangePercent.toFixed(1),
+        displayDate(p.lastDate) ?? '', +spent.toFixed(2)]);
+    }
+  }
+  saveWorkbook('ספקים ומוצרים.xlsx', [['ספקים', sRows], ['מוצרים', pRows]]).catch((e) => alertBox(e.message));
+}
+
+function alertBox(text) { root().prepend(h('div', { class: 'center' }, card(null, h('p', { class: 'error' }, text)))); }
+
+// --- credit card check (the same matching as on the phone) -----------------------------------
+const OUTCOME_ORDER = ['missing', 'matched', 'no_invoice', 'outside'];
+state.card = { statements: [], error: null };
+
+function invoicesForMatching() {
+  return state.data.documents()
+    .filter((d) => d.invoice_id != null && !EXCLUDED.includes(d.status))
+    .map((d) => ({ documentId: d.id, supplierName: d.supplier_name, supplierTaxId: d.supplier_tax_id, date: d.invoice_date?.slice(0, 10) ?? null,
+      total: d.total, groupId: d.group?.id ?? null, description: d.description, folder: d.folder_name }));
+}
+
+async function addStatements(files) {
+  state.card.error = null;
+  try {
+    const XLSX = await loadXlsx();
+    for (const f of files) {
+      const wb = XLSX.read(await f.arrayBuffer(), { type: 'array' });
+      const rows = wb.SheetNames.flatMap((n) => XLSX.utils.sheet_to_json(wb.Sheets[n], { header: 1, raw: false, defval: '' }));
+      const txs = parseStatement(rows);
+      if (!txs.length) { state.card.error = `בקובץ "${f.name}" לא זוהה פירוט עסקאות. כרגע נתמך הייצוא של ישראכרט (Excel).`; continue; }
+      state.card.statements = state.card.statements.filter((s) => s.name !== f.name).concat([{ name: f.name, txs }]);
+    }
+  } catch (e) {
+    state.card.error = 'לא הצלחתי לקרוא את הקובץ: ' + e.message;
+  }
+  render();
+}
+
+function cardView(folder) {
+  const periods = state.data.periods();
+  const p = periods.find((x) => x.folder_name === folder) ?? periods[0];
+  if (!p) return page('card', 'הצלבה מול כרטיס אשראי', null, null, card(null, h('p', {}, 'אין עדיין תקופות.')));
+  const input = h('input', { type: 'file', accept: '.xlsx,.xls,.csv', multiple: true, hidden: true, onchange: (e) => addStatements([...e.target.files]) });
+  const drop = h('div', { class: 'dropzone', onclick: () => input.click(),
+    ondragover: (e) => { e.preventDefault(); e.currentTarget.classList.add('over'); },
+    ondragleave: (e) => e.currentTarget.classList.remove('over'),
+    ondrop: (e) => { e.preventDefault(); e.currentTarget.classList.remove('over'); addStatements([...e.dataTransfer.files]); } },
+  h('strong', {}, state.card.statements.length ? 'הוסף קובץ נוסף (חודש חיוב נוסף)' : 'גרור לכאן את קובץ פירוט העסקאות, או לחץ לבחירה'),
+  h('span', { class: 'muted' }, 'ייצוא Excel מאתר חברת האשראי. הקובץ נקרא בדפדפן בלבד ולא נשמר.'), input);
+  const select = h('select', { class: 'select', onchange: (e) => { location.hash = `#/card/${e.target.value}`; } },
+    periods.map((x) => h('option', { value: x.folder_name, selected: x === p ? true : null }, `תקופה ${x.period?.label ?? x.folder_name} ${x.period?.year ?? ''}`)));
+  const files = state.card.statements.length ? h('div', { class: 'pills' }, state.card.statements.map((s) => h('span', { class: 'pill neutral' }, ltr(s.name), ` · ${s.txs.length} חיובים `,
+    h('button', { class: 'pill-x', title: 'הסר', onclick: () => { state.card.statements = state.card.statements.filter((x) => x !== s); render(); } }, '✕')))) : null;
+  const head = card(null, h('div', { class: 'toolbar' }, h('label', { class: 'muted' }, 'תקופה: '), select), drop, files,
+    state.card.error ? h('p', { class: 'error' }, state.card.error) : null,
+    state.card.statements.length === 1 ? h('p', { class: 'note' }, 'תקופה של חודשיים נפרסת בדרך כלל על שני דפי חיוב: הוסף גם את הקובץ של החודש השני.') : null);
+  if (!state.card.statements.length) return page('card', 'הצלבה מול כרטיס אשראי', 'כל חיוב בכרטיס מול החשבונית שלו', null, head);
+
+  const period = { year: p.period.year, start: p.period.start, end: p.period.end };
+  const accounts = state.data.groups.filter((g) => g.onAccount).map(account);
+  const m = matchAll(merge(state.card.statements.map((s) => s.txs)), invoicesForMatching(), period, accounts);
+  const by = (o) => m.results.filter((r) => r.outcome === o).sort((a, b) => a.transaction.date.localeCompare(b.transaction.date));
+  const [missing, matched, noInvoice, outside] = OUTCOME_ORDER.map(by);
+  const inPeriodCount = m.results.length - outside.length;
+  const sum = (list) => list.reduce((t, r) => t + r.transaction.amount, 0);
+  const txRow = (r) => {
+    const t = r.transaction, inv = r.invoice;
+    const sub = [displayDate(t.date), t.details, inv ? `חשבונית: ${inv.supplierName ?? ''} · ${displayDate(inv.date) ?? ''}` : null].filter(Boolean).join(' · ');
+    return h(inv ? 'a' : 'div', { class: 'row', href: inv ? `#/doc/${inv.documentId}` : null },
+      h('div', { class: 'row-main' }, h('div', { class: 'row-title' }, t.merchant), h('div', { class: 'muted' }, sub)), h('div', { class: 'amount' }, money(t.amount)));
+  };
+  const section = (title, list, tone, open, explain) => list.length ? h('details', { class: 'card section', open: open || null },
+    h('summary', {}, h('span', {}, title), pill(String(list.length), tone)), explain ? h('p', { class: 'note' }, explain) : null, list.map(txRow)) : null;
+  const pending = p.pending;
+
+  return page('card', 'הצלבה מול כרטיס אשראי', `תקופה ${p.period.label} ${p.period.year}`, null, head,
+    h('section', { class: 'card hero' },
+      h('div', { class: 'big ' + (missing.length ? 'error' : '') }, missing.length ? `${missing.length} חיובים בלי חשבונית · ${money(sum(missing))}` : 'לכל החיובים בתקופה נמצאה חשבונית'),
+      h('div', { class: 'muted' }, `${inPeriodCount} חיובים בתקופה · ${matched.length} מותאמים · ${noInvoice.length} לא צריכים חשבונית`),
+      pending ? h('p', { class: 'error' }, `${pending} חשבוניות עוד לא נקראו בטלפון, וייתכן שחלק מהחיובים יתאימו אליהן אחרי הקריאה.`) : null),
+    section('חיובים בלי חשבונית', missing, 'danger', true, 'לא נמצאה חשבונית באותו סכום, מ-45 יום לפני החיוב ועד 15 יום אחריו.'),
+    m.accounts.map(accountCard),
+    section('מותאמים', matched, 'success', false),
+    section('לא צריך חשבונית', noInvoice, 'neutral', false, 'מסים, ביטוח לאומי, עמלות וחנויות חו״ל.'),
+    section('מחוץ לתקופה', outside, 'neutral', false, 'חיובים בקובץ שהתאריך שלהם בתקופה אחרת.'));
+}
+
+/** A supplier on account: each card payment with the invoices that add up to it. */
+function accountCard(b) {
+  const uncovered = b.payments.filter((p) => !b.hints.get(p)).length;
+  const name = b.payments[0]?.merchant || b.account.title;
+  const invLine = (inv) => h('a', { class: 'row sub', href: `#/doc/${inv.documentId}` },
+    h('div', { class: 'row-main' }, h('div', {}, inv.description ?? 'חשבונית'), h('div', { class: 'muted' }, displayDate(inv.date) ?? '')), h('div', { class: 'amount' }, money(inv.total)));
+  return h('section', { class: 'card' },
+    h('div', { class: 'period-head' }, h('h2', {}, `בהקפה: ${name}`), pill(uncovered ? 'חסרות חשבוניות' : 'מכוסה', uncovered ? 'danger' : 'success')),
+    h('p', { class: 'muted' }, uncovered ? `ל-${uncovered} תשלומים לא נמצאו חשבוניות שמסתכמות בדיוק בסכום.` : 'לכל תשלום בכרטיס נמצאו החשבוניות שמסתכמות בו.'),
+    b.payments.map((p) => {
+      const covered = b.hints.get(p);
+      return h('div', { class: 'payment' },
+        h('div', { class: 'payment-head' }, h('div', {}, h('div', { class: 'amount big-amount' }, money(p.amount)), h('div', { class: 'muted' }, `שולם בכרטיס ב-${displayDate(p.date)}`)),
+          pill(covered ? 'מכוסה' : 'חסרות חשבוניות', covered ? 'success' : 'danger')),
+        covered ? covered.map(invLine) : h('p', { class: 'note' }, 'לא נמצאו חשבוניות שמסתכמות בדיוק בסכום הזה.'));
+    }),
+    b.unassigned.length ? h('details', { class: 'section' }, h('summary', {}, h('span', {}, `חשבוניות שלא שויכו לתשלום (${b.unassigned.length})`)),
+      h('p', { class: 'note' }, 'עוד לא שולמו, או ששולמו בדף חיוב שלא הוספת.'), b.unassigned.map(invLine)) : null);
+}
+
+// --- uploading invoices from the computer (the phone reads them when the app opens) ----------
+const UPLOAD_API = 'https://www.googleapis.com/upload/drive/v3/files';
+const MAX_UPLOAD = 5 * 1024 * 1024;
+const UPLOAD_TYPES = ['application/pdf', 'image/jpeg', 'image/png', 'image/webp', 'image/heic', 'image/heif'];
+state.uploads = [];
+
+function periodOfDate(d) {
+  const m = d.getMonth() + 1, start = m % 2 ? m : m - 1;
+  return `${d.getFullYear()}-${String(start).padStart(2, '0')}-${String(start + 1).padStart(2, '0')}`;
+}
+
+function uploadView(chosen) {
+  const known = state.data.periods().map((x) => x.folder_name);
+  const now = periodOfDate(new Date());
+  const options = [...new Set([now, ...known])].sort().reverse();
+  const period = chosen && /^\d{4}-\d{2}-\d{2}$/.test(chosen) ? chosen : now;
+  if (!options.includes(period)) options.unshift(period);
+  const select = h('select', { class: 'select', onchange: (e) => history.replaceState(null, '', `#/upload?period=${e.target.value}`) },
+    options.map((f) => h('option', { value: f, selected: f === period ? true : null }, `תקופה ${parsePeriod(f)?.label ?? f} ${parsePeriod(f)?.year ?? ''}`)));
+  if (!state.token) {
+    return page('invoices', 'העלאת חשבוניות', null, null, card(null, h('p', {}, 'כדי להעלות קבצים ל-Drive צריך להתחבר עם Google.'),
+      h('div', { class: 'actions' }, h('button', { class: 'primary', onclick: signIn }, 'התחבר עם Google'))));
+  }
+  const input = h('input', { type: 'file', accept: UPLOAD_TYPES.join(','), multiple: true, hidden: true, onchange: (e) => uploadFiles([...e.target.files], select.value) });
+  const drop = h('div', { class: 'dropzone', onclick: () => input.click(),
+    ondragover: (e) => { e.preventDefault(); e.currentTarget.classList.add('over'); },
+    ondragleave: (e) => e.currentTarget.classList.remove('over'),
+    ondrop: (e) => { e.preventDefault(); e.currentTarget.classList.remove('over'); uploadFiles([...e.dataTransfer.files], select.value); } },
+  h('strong', {}, 'גרור לכאן חשבוניות (PDF או תמונה), או לחץ לבחירה'), h('span', { class: 'muted' }, 'הקבצים עולים לתיקיית התקופה ב-Drive.'), input);
+  const list = state.uploads.length ? card('קבצים', state.uploads.map((u) => h('div', { class: 'row' },
+    h('div', { class: 'row-main' }, h('div', { class: 'row-title' }, ltr(u.file.name)), u.name ? h('div', { class: 'muted' }, 'נשמר בשם ', ltr(u.name)) : null),
+    pill(u.status, u.tone)))) : null;
+  return page('invoices', 'העלאת חשבוניות', null, null,
+    card(null, h('div', { class: 'toolbar' }, h('label', { class: 'muted' }, 'לתקופה: '), select), drop,
+      h('p', { class: 'note' }, 'הטלפון קורא את הקבצים החדשים בפעם הבאה שפותחים את האפליקציה (או בלחיצה על "קרא חשבוניות"), ואחרי הקריאה הם יופיעו גם כאן.')),
+    list);
+}
+
+async function sha256Hex(buf) {
+  return [...new Uint8Array(await crypto.subtle.digest('SHA-256', buf))].map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+async function driveList(q, fields) {
+  const out = [];
+  let pageToken = '';
+  do {
+    const r = await (await drive(`${DRIVE}?q=${encodeURIComponent(q)}&fields=nextPageToken,files(${fields})&pageSize=1000&spaces=drive${pageToken ? '&pageToken=' + pageToken : ''}`)).json();
+    out.push(...(r.files ?? []));
+    pageToken = r.nextPageToken ?? '';
+  } while (pageToken);
+  return out;
+}
+
+const esc = (s) => s.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+async function folder(name, parent) {
+  const q = `mimeType='application/vnd.google-apps.folder' and name='${esc(name)}' and '${esc(parent)}' in parents and trashed=false`;
+  const found = (await driveList(q, 'id'))[0];
+  if (found) return found.id;
+  const r = await fetch(DRIVE + '?fields=id', { method: 'POST', headers: { Authorization: 'Bearer ' + state.token, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, mimeType: 'application/vnd.google-apps.folder', parents: [parent] }) });
+  if (!r.ok) throw new Error(`Drive ${r.status}`);
+  return (await r.json()).id;
+}
+
+async function uploadFiles(files, periodKey) {
+  const period = parsePeriod(periodKey);
+  if (!period || !files.length) return;
+  const items = files.map((file) => ({ file, status: 'ממתין', tone: 'neutral' }));
+  state.uploads = [...items, ...state.uploads];
+  render();
+  const set = (u, status, tone, name) => { u.status = status; u.tone = tone; if (name) u.name = name; render(); };
+  try {
+    const hashes = new Set((await driveList("appProperties has { key='app' and value='invoice-collector' } and trashed=false", 'appProperties'))
+      .map((f) => f.appProperties?.sha256).filter(Boolean));
+    const root = await folder('חשבוניות', 'root');
+    const target = await folder(period.label, await folder(String(period.year), root));
+    const taken = new Set((await driveList(`'${target}' in parents and trashed=false`, 'name')).map((f) => f.name.replace(/\.[^.]*$/, '')));
+    const today = new Date();
+    const day = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+    for (const u of items) {
+      const f = u.file;
+      if (!UPLOAD_TYPES.includes(f.type)) { set(u, 'לא PDF או תמונה', 'warning'); continue; }
+      if (f.size > MAX_UPLOAD) { set(u, 'גדול מ-5MB: העלה מהטלפון', 'warning'); continue; }
+      set(u, 'מעלה…', 'info');
+      const buf = await f.arrayBuffer();
+      const hash = await sha256Hex(buf);
+      if (hashes.has(hash)) { set(u, 'כבר קיים', 'neutral'); continue; }
+      let n = 1, stem;
+      do { stem = `${day}_${String(n++).padStart(3, '0')}`; } while (taken.has(stem));
+      taken.add(stem);
+      const ext = (f.name.match(/\.([^.]+)$/)?.[1] ?? (f.type === 'application/pdf' ? 'pdf' : 'jpg')).toLowerCase();
+      const name = `${stem}.${ext}`;
+      const meta = { name, parents: [target], description: `הועלה מהאתר: ${f.name}`,
+        appProperties: { app: 'invoice-collector', sha256: hash, period: period.year + '-' + period.label } };
+      const body = new FormData();
+      body.append('metadata', new Blob([JSON.stringify(meta)], { type: 'application/json' }));
+      body.append('file', new Blob([buf], { type: f.type }));
+      const r = await fetch(`${UPLOAD_API}?uploadType=multipart&fields=id`, { method: 'POST', headers: { Authorization: 'Bearer ' + state.token }, body });
+      if (!r.ok) { set(u, `שגיאה (${r.status})`, 'danger'); continue; }
+      hashes.add(hash);
+      set(u, 'הועלה', 'success', name);
+    }
+  } catch (e) {
+    items.filter((u) => ['ממתין', 'מעלה…'].includes(u.status)).forEach((u) => { u.status = 'שגיאה'; u.tone = 'danger'; });
+    alertBox('ההעלאה נכשלה: ' + e.message);
+    render();
+  }
+}
+
 // --- router ---------------------------------------------------------------------------------
 function render() {
   if (!state.data) { show(welcome()); return; }
@@ -416,6 +682,8 @@ function render() {
   try {
     if (parts[0] === 'period') view = periodView(parts[1]);
     else if (parts[0] === 'doc') view = docView(+parts[1]);
+    else if (parts[0] === 'card') view = cardView(parts[1]);
+    else if (parts[0] === 'upload') view = uploadView(new URLSearchParams(query ?? '').get('period'));
     else if (parts[0] === 'products') view = productsView(new URLSearchParams(query ?? '').get('q') ?? '');
     else if (parts[0] === 'supplier') view = supplierView(+parts[1]);
     else if (parts[0] === 'product') view = productView(+parts[1], decodeURIComponent(parts.slice(2).join('/')));
