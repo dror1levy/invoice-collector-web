@@ -44,11 +44,26 @@ const b64url = (s) => {
   return Uint8Array.from(bin, (c) => c.charCodeAt(0));
 };
 
-export function client(token) {
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** onWait(seconds) is called while Gmail asks to slow down. */
+export function client(token, onWait) {
+  // Gmail allows a limited number of requests per minute: over it (429, or 403 "quota / rate
+  // limit"), wait and try again, longer each time.
   const get = async (path) => {
-    const r = await fetch(API + path, { headers: { Authorization: 'Bearer ' + token } });
-    if (!r.ok) throw new Error(`Gmail ${r.status}: ${(await r.text()).slice(0, 200)}`);
-    return r.json();
+    for (let attempt = 0; ; attempt++) {
+      const r = await fetch(API + path, { headers: { Authorization: 'Bearer ' + token } });
+      if (r.ok) return r.json();
+      const text = await r.text();
+      const limited = r.status === 429 || (r.status === 403 && /quota|rate ?limit/i.test(text));
+      if (!limited || attempt >= 6) {
+        if (limited) throw new Error('Gmail מגביל כרגע את מספר הבקשות. נסה שוב בעוד כמה דקות.');
+        throw new Error(`Gmail ${r.status}: ${text.slice(0, 200)}`);
+      }
+      const wait = Math.min(60, 5 * 2 ** attempt);
+      onWait?.(wait);
+      await sleep(wait * 1000);
+    }
   };
   return {
     async search(q, limit = 300) {
@@ -113,8 +128,8 @@ const looksExcluded = (text) => EXCLUDED_WORDS.some((w) => has(text, w)) && !TAX
  * fetchLink(links) downloads an invoice from links (the server function) or returns null.
  * onProgress(done, total) while reading the emails.
  */
-export async function findInvoices(token, period, fetchLink, onProgress) {
-  const gmail = client(token);
+export async function findInvoices(token, period, fetchLink, onProgress, onWait) {
+  const gmail = client(token, onWait);
   const ids = await gmail.search(query(period));
   const items = [];
   let done = 0, ignored = 0;
@@ -141,8 +156,8 @@ export async function findInvoices(token, period, fetchLink, onProgress) {
     for (const f of found) items.push({ ...f, subject: m.subject, from: m.from, received: m.receivedAt, emailId: m.id });
     onProgress?.(++done, ids.length);
   };
-  // A few emails at a time.
+  // Two emails at a time: Gmail's per-minute limit is easily reached otherwise.
   const queue = [...ids];
-  await Promise.all(Array.from({ length: 4 }, async () => { while (queue.length) await work(queue.shift()); }));
+  await Promise.all(Array.from({ length: 2 }, async () => { while (queue.length) await work(queue.shift()); }));
   return { items: items.sort((a, b) => a.received - b.received), ignored };
 }

@@ -1,14 +1,14 @@
 // The desktop web view of the app: reads the phone's database backup from Google Drive (view
 // only) and shows the periods, invoices and the suppliers & products dashboard.
-import { CONFIG } from './config.js?v=10';
-import { Data } from './data.js?v=10';
-import { timeChart } from './charts.js?v=10';
-import { account, matchAll, merge, parseStatement } from './card.js?v=10';
-import { EXTRA_DAYS, GMAIL_SCOPE, findInvoices, periodEnd } from './gmail.js?v=10';
+import { CONFIG } from './config.js?v=11';
+import { Data } from './data.js?v=11';
+import { timeChart } from './charts.js?v=11';
+import { account, matchAll, merge, parseStatement } from './card.js?v=11';
+import { EXTRA_DAYS, GMAIL_SCOPE, findInvoices, periodEnd } from './gmail.js?v=11';
 import {
   ALL_KINDS, EXCLUDED, FIXED, OCCASIONAL, PRODUCTS, RUNNING, cumulative, displayDate, displayPeriod, parsePeriod,
   quantityByMonth, sameDayTogether, withVat,
-} from './logic.js?v=10';
+} from './logic.js?v=11';
 
 const SQL_JS = 'https://cdn.jsdelivr.net/npm/sql.js@1.10.3/dist/';
 const DRIVE = 'https://www.googleapis.com/drive/v3/files';
@@ -725,7 +725,8 @@ async function searchGmail(periodKey) {
   render();
   try {
     const period = parsePeriod(periodKey);
-    const found = await findInvoices(state.token, period, fetchLinkThroughServer, (d, t) => { g.progress = [d, t]; render(); });
+    const found = await findInvoices(state.token, period, fetchLinkThroughServer, (d, t) => { g.progress = [d, t]; g.waiting = null; render(); },
+      (sec) => { g.waiting = sec; render(); });
     const hashes = await knownHashes();
     const seen = new Set();
     let repeats = 0;
@@ -765,7 +766,8 @@ function gmailView(chosen) {
     h('button', { class: 'primary', disabled: g.busy || null, onclick: start }, g.result && g.period === period ? 'חפש שוב' : 'חפש חשבוניות במייל')),
   h('p', { class: 'note' }, `מיילים שמזכירים חשבונית, שהתקבלו מתחילת התקופה ועד ${EXTRA_DAYS} יום אחרי סופה: קבצים מצורפים, וגם חשבוניות שנשלחו כקישור להורדה. חשבונית שהתאריך שלה אחרי התקופה מועברת אחרי הקריאה לתקופה שלה. הגישה למייל היא לקריאה בלבד.`),
   !canRead ? h('p', { class: 'note' }, 'בפעם הראשונה Google תבקש לאשר לאתר לקרוא את המייל. אם יופיע מסך שהאפליקציה לא אומתה, זה תקין: לוחצים "המשך".') : null,
-  g.busy ? h('div', { class: 'toolbar' }, h('div', { class: 'spinner small' }), h('span', {}, g.progress?.[1] ? `קורא מיילים… ${g.progress[0]} מתוך ${g.progress[1]}` : 'מחפש במייל…')) : null,
+  g.busy ? h('div', { class: 'toolbar' }, h('div', { class: 'spinner small' }), h('span', {}, g.progress?.[1] ? `קורא מיילים… ${g.progress[0]} מתוך ${g.progress[1]}` : 'מחפש במייל…'),
+    g.waiting ? h('span', { class: 'muted' }, `Gmail ביקש להאט, ממשיך בעוד ${g.waiting} שניות`) : null) : null,
   g.error ? h('p', { class: 'error' }, g.error) : null);
   if (!g.result || g.period !== period) return page('invoices', 'ייבוא חשבוניות מהמייל', null, null, head);
 
