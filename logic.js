@@ -42,7 +42,7 @@ function sameSupplier(e, inv) {
     const t = normalizeTaxId(inv.supplierTaxId);
     return t != null && normalizeTaxId(e.key) === t;
   }
-  if (!inv.supplierName) return false;
+  if (!inv.supplierName || e.key.includes('@')) return false;
   const key = normalizeName(e.key);
   return key.length > 0 && (normalizeName(inv.supplierName).includes(key) || sameName(e.key, inv.supplierName));
 }
