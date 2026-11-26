@@ -1,14 +1,14 @@
 // The desktop web view of the app: reads the phone's database backup from Google Drive (view
 // only) and shows the periods, invoices and the suppliers & products dashboard.
-import { CONFIG } from './config.js?v=14';
-import { Data } from './data.js?v=14';
-import { timeChart } from './charts.js?v=14';
-import { account, matchAll, merge, parseStatement } from './card.js?v=14';
-import { EXTRA_DAYS, GMAIL_SCOPE, findInvoices, periodEnd } from './gmail.js?v=14';
+import { CONFIG } from './config.js?v=15';
+import { Data } from './data.js?v=15';
+import { timeChart } from './charts.js?v=15';
+import { account, matchAll, merge, parseStatement } from './card.js?v=15';
+import { EXTRA_DAYS, GMAIL_SCOPE, findInvoices, periodEnd } from './gmail.js?v=15';
 import {
   ALL_KINDS, EXCLUDED, FIXED, OCCASIONAL, PRODUCTS, RUNNING, cumulative, displayDate, displayPeriod, parsePeriod,
   normalizeTaxId, quantityByMonth, sameDayTogether, sameName, withVat,
-} from './logic.js?v=14';
+} from './logic.js?v=15';
 
 const SQL_JS = 'https://cdn.jsdelivr.net/npm/sql.js@1.10.3/dist/';
 const DRIVE = 'https://www.googleapis.com/drive/v3/files';
@@ -271,10 +271,13 @@ function periodView(folder) {
       })
       : list.sort((a, b) => (a.invoice_date ?? a.file_name).localeCompare(b.invoice_date ?? b.file_name)).map(row)) : null;
 
-  const fixed = card('הוצאות קבועות', h('div', { class: 'list' }, p.checklist.map((c) => {
-    const mine = c.ids.map((id) => docs.find((d) => d.id === id)).filter(Boolean);
+  const outsideCount = p.checklist.reduce((n, c) => n + c.outsideIds.length, 0);
+  const fixed = card(null, h('div', { class: 'period-head' }, h('h2', {}, 'הוצאות קבועות'), outsideCount ? pill(`+${outsideCount} מחוץ לתקופה`, 'info') : null),
+    h('div', { class: 'list' }, p.checklist.map((c) => {
+    const mine = [...c.ids, ...c.outsideIds].map((id) => docs.find((d) => d.id === id)).filter(Boolean);
     return h('details', { class: 'fixed' },
       h('summary', {}, h('span', { class: 'row-title' }, c.item.title),
+        c.outsideIds.length ? pill(`+${c.outsideIds.length} מחוץ לתקופה`, 'info') : null,
         !c.linked ? pill('לא משויך ספק', 'warning') : c.complete ? pill(`${c.found} מתוך ${c.item.expectedPerPeriod}`, 'success') : pill(`${c.found} מתוך ${c.item.expectedPerPeriod}`, 'danger')),
       mine.map((d) => h('a', { class: 'row sub', href: `#/doc/${d.id}` },
         h('div', { class: 'row-main' }, ltr(displayPeriod(d.billing_start, d.billing_end) ?? displayDate(d.invoice_date) ?? d.file_name),

@@ -1,5 +1,5 @@
 // Reads the app's database (the phone's Drive backup, opened with sql.js) into plain objects.
-import { EXCLUDED, PRODUCTS, buildCatalog, checklist, groupFor, parsePeriod } from './logic.js?v=14';
+import { EXCLUDED, PRODUCTS, buildCatalog, checklist, groupFor, parsePeriod } from './logic.js?v=15';
 
 const SEPARATOR = '\n';
 
@@ -52,7 +52,8 @@ export class Data {
       FROM documents d JOIN periods p ON p.id = d.period_id
       LEFT JOIN invoices i ON i.document_id = d.id LEFT JOIN suppliers s ON s.id = i.supplier_id
       ${where} ORDER BY d.file_name`, periodId == null ? [] : [periodId]).map((r) => {
-      const ref = { supplierName: r.supplier_name, supplierTaxId: r.supplier_tax_id, description: r.description, groupId: r.group_id, id: r.id };
+      const ref = { supplierName: r.supplier_name, supplierTaxId: r.supplier_tax_id, description: r.description, groupId: r.group_id, id: r.id,
+        outsidePeriod: String(r.issues ?? '').includes('date_outside_period') };
       const group = r.invoice_id != null ? groupFor(this.groups, ref) : null;
       return { ...r, ref, group, issues: String(r.issues ?? '').split(',').filter(Boolean) };
     });

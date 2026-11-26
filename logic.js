@@ -69,14 +69,19 @@ export function groupFor(items, inv) {
   return best;
 }
 
-/** Fixed expenses of a period: how many invoices each has. Each invoice counts once. */
+/**
+ * Fixed expenses of a period: how many invoices each has. Each invoice counts once; one dated
+ * outside the period (an old bill kept in this report) is listed in outsideIds, not counted.
+ */
 export function checklist(items, invoices) {
   const owner = invoices.map((inv) => groupFor(items, inv));
   return items.filter((i) => i.kind === FIXED).map((item) => {
-    const ids = invoices.filter((_, k) => owner[k] === item).map((inv) => inv.id);
+    const mine = invoices.filter((_, k) => owner[k] === item);
+    const ids = mine.filter((inv) => !inv.outsidePeriod).map((inv) => inv.id);
+    const outsideIds = mine.filter((inv) => inv.outsidePeriod).map((inv) => inv.id);
     const linked = item.matchers.length > 0 || item.taxIds.length > 0;
     const missing = Math.max(0, item.expectedPerPeriod - ids.length);
-    return { item, found: ids.length, ids, linked, missing, complete: linked && missing === 0 };
+    return { item, found: ids.length, ids, outsideIds, linked, missing, complete: linked && missing === 0 };
   });
 }
 
