@@ -1,14 +1,14 @@
 // The desktop web view of the app: reads the phone's database backup from Google Drive (view
 // only) and shows the periods, invoices and the suppliers & products dashboard.
-import { CONFIG } from './config.js?v=11';
-import { Data } from './data.js?v=11';
-import { timeChart } from './charts.js?v=11';
-import { account, matchAll, merge, parseStatement } from './card.js?v=11';
-import { EXTRA_DAYS, GMAIL_SCOPE, findInvoices, periodEnd } from './gmail.js?v=11';
+import { CONFIG } from './config.js?v=12';
+import { Data } from './data.js?v=12';
+import { timeChart } from './charts.js?v=12';
+import { account, matchAll, merge, parseStatement } from './card.js?v=12';
+import { EXTRA_DAYS, GMAIL_SCOPE, findInvoices, periodEnd } from './gmail.js?v=12';
 import {
   ALL_KINDS, EXCLUDED, FIXED, OCCASIONAL, PRODUCTS, RUNNING, cumulative, displayDate, displayPeriod, parsePeriod,
-  quantityByMonth, sameDayTogether, withVat,
-} from './logic.js?v=11';
+  normalizeTaxId, quantityByMonth, sameDayTogether, sameName, withVat,
+} from './logic.js?v=12';
 
 const SQL_JS = 'https://cdn.jsdelivr.net/npm/sql.js@1.10.3/dist/';
 const DRIVE = 'https://www.googleapis.com/drive/v3/files';
@@ -662,35 +662,101 @@ async function folder(name, parent) {
   return (await r.json()).id;
 }
 
-async function uploadFiles(files, periodKey) {
-  const period = parsePeriod(periodKey);
-  if (!period || !files.length) return;
-  const items = files.map((file) => ({ file, status: 'ממתין', tone: 'neutral' }));
+// --- reading before uploading: an invoice the app already has (also as another file, e.g. a
+// photo of it) is never uploaded, so it doesn't reach Drive and the phone at all --------------
+const bytesToBase64 = (bytes) => {
+  let bin = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  return btoa(bin);
+};
+
+async function readBeforeUpload(name, type, bytes) {
+  const r = await fetch(CONFIG.reader, { method: 'POST', headers: { Authorization: 'Bearer ' + state.token, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, mimeType: type, data: bytesToBase64(bytes) }) });
+  const body = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(body.error ?? `שגיאה ${r.status}`);
+  return body;
+}
+
+const normNumber = (n) => String(n ?? '').toUpperCase().replace(/[^\p{L}\p{N}]/gu, '').replace(/^0+/, '') || null;
+
+/**
+ * Where the app already has this invoice (same supplier by tax id or name, same number, same
+ * total): {folder, documentId} from the data, or {folder, pending: true} among files waiting
+ * for the phone. Null when it is new.
+ */
+function alreadyHave(e) {
+  const number = normNumber(e?.invoice_number);
+  if (!number || e.is_invoice === false) return null;
+  const taxId = normalizeTaxId(e.supplier_tax_id);
+  const sameSupplier = (name, tax) => (taxId && normalizeTaxId(tax) === taxId) || (e.supplier_name && name && sameName(name, e.supplier_name));
+  const sameTotal = (t) => e.total == null || t == null || Math.abs(t - e.total) < 0.01;
+  const doc = state.data.documents().find((d) => d.invoice_id != null && !['duplicate', 'not_invoice'].includes(d.status)
+    && normNumber(d.invoice_number) === number && sameTotal(d.total) && sameSupplier(d.supplier_name, d.supplier_tax_id));
+  if (doc) return { folder: doc.folder_name, documentId: doc.id };
+  for (const f of state.pending?.files ?? []) {
+    const o = state.pending.readings.get(f.id)?.extraction;
+    if (o && normNumber(o.invoice_number) === number && sameTotal(o.total) && sameSupplier(o.supplier_name, o.supplier_tax_id)) return { folder: f.appProperties?.period, pending: true };
+  }
+  return null;
+}
+
+/** The period an invoice belongs in: the chosen one, or its own when dated after it. */
+function periodFor(e, chosen) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(e?.invoice_date ?? '');
+  if (!m || e.is_invoice === false) return chosen;
+  const own = periodOfDate(new Date(+m[1], +m[2] - 1, +m[3]));
+  return own > chosen ? own : chosen;
+}
+
+const isTaxDoc = (e) => e && e.is_invoice !== false && ['tax_invoice', 'tax_invoice_receipt', 'credit_note'].includes(e.doc_type);
+
+/**
+ * Uploads files to their period's Drive folder. entries: File, or {file, reading} when already
+ * read. Each file is read first (unless given), and not uploaded when the app already has it.
+ */
+async function uploadFiles(entries, periodKey) {
+  if (!parsePeriod(periodKey) || !entries.length) return;
+  const items = entries.map((x) => (x instanceof File ? { file: x } : { ...x })).map((x) => ({ ...x, status: 'ממתין', tone: 'neutral' }));
   state.uploads = [...items, ...state.uploads];
   render();
   const set = (u, status, tone, name) => { u.status = status; u.tone = tone; if (name) u.name = name; render(); };
+  const folders = new Map(); // period -> {id, taken}
+  const folderOf = async (key) => {
+    if (!folders.has(key)) {
+      const p = parsePeriod(key);
+      const id = await folder(p.label, await folder(String(p.year), await folder('חשבוניות', 'root')));
+      folders.set(key, { id, taken: new Set((await driveList(`'${id}' in parents and trashed=false`, 'name')).map((f) => f.name.replace(/\.[^.]*$/, ''))) });
+    }
+    return folders.get(key);
+  };
   try {
     const hashes = await knownHashes();
-    const root = await folder('חשבוניות', 'root');
-    const target = await folder(period.label, await folder(String(period.year), root));
-    const taken = new Set((await driveList(`'${target}' in parents and trashed=false`, 'name')).map((f) => f.name.replace(/\.[^.]*$/, '')));
     const today = new Date();
     const day = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
     for (const u of items) {
       const f = u.file;
       if (!UPLOAD_TYPES.includes(f.type)) { set(u, 'לא PDF או תמונה', 'warning'); continue; }
       if (f.size > MAX_UPLOAD) { set(u, 'גדול מ-5MB: העלה מהטלפון', 'warning'); continue; }
-      set(u, 'מעלה…', 'info');
-      const buf = await f.arrayBuffer();
+      const buf = new Uint8Array(await f.arrayBuffer());
       const hash = await sha256Hex(buf);
       if (hashes.has(hash)) { set(u, 'כבר קיים', 'neutral'); continue; }
+      if (!u.reading && CONFIG.reader) {
+        set(u, 'קורא ובודק כפולות…', 'info');
+        try { u.reading = await readBeforeUpload(f.name, f.type, buf); } catch (e) { u.readError = e.message; }
+      }
+      const e = u.reading?.extraction;
+      const have = e && alreadyHave(e);
+      if (have) { set(u, `כבר קיימת בתקופה ${parsePeriod(have.folder)?.label ?? have.folder}`, 'neutral'); continue; }
+      const key = periodFor(e, periodKey);
+      const target = await folderOf(key);
+      set(u, 'מעלה…', 'info');
       let n = 1, stem;
-      do { stem = `${day}_${String(n++).padStart(3, '0')}`; } while (taken.has(stem));
-      taken.add(stem);
+      do { stem = `${day}_${String(n++).padStart(3, '0')}`; } while (target.taken.has(stem));
+      target.taken.add(stem);
       const ext = (f.name.match(/\.([^.]+)$/)?.[1] ?? (f.type === 'application/pdf' ? 'pdf' : 'jpg')).toLowerCase();
       const name = `${stem}.${ext}`;
-      const meta = { name, parents: [target], description: `הועלה מהאתר: ${f.name}`,
-        appProperties: { app: 'invoice-collector', sha256: hash, period: period.year + '-' + period.label } };
+      const meta = { name, parents: [target.id], description: `הועלה מהאתר: ${f.name}`, appProperties: { app: 'invoice-collector', sha256: hash, period: key } };
       const body = new FormData();
       body.append('metadata', new Blob([JSON.stringify(meta)], { type: 'application/json' }));
       body.append('file', new Blob([buf], { type: f.type }));
@@ -698,13 +764,18 @@ async function uploadFiles(files, periodKey) {
       if (!r.ok) { set(u, `שגיאה (${r.status})`, 'danger'); continue; }
       hashes.add(hash);
       u.fileId = (await r.json()).id;
-      set(u, 'הועלה', 'success', name);
+      if (u.reading) {
+        // Saved for the phone, which then doesn't read the file again.
+        await fetch(CONFIG.reader, { method: 'POST', headers: { Authorization: 'Bearer ' + state.token, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ fileId: u.fileId, reading: u.reading }) }).catch(() => {});
+      }
+      set(u, key === periodKey ? 'הועלה' : `הועלה לתקופה ${parsePeriod(key).label} (לפי התאריך)`, 'success', name);
     }
-    // Read them right away (the phone uses these readings instead of reading again).
-    const uploaded = items.filter((u) => u.fileId).map((u) => u.fileId);
-    if (uploaded.length) { await loadPending(); readPending(uploaded); }
+    await loadPending();
+    const unread = items.filter((u) => u.fileId && !u.reading).map((u) => u.fileId);
+    if (unread.length) readPending(unread);
   } catch (e) {
-    items.filter((u) => ['ממתין', 'מעלה…'].includes(u.status)).forEach((u) => { u.status = 'שגיאה'; u.tone = 'danger'; });
+    items.filter((u) => ['ממתין', 'מעלה…', 'קורא ובודק כפולות…'].includes(u.status)).forEach((u) => { u.status = 'שגיאה'; u.tone = 'danger'; });
     alertBox('ההעלאה נכשלה: ' + e.message);
     render();
   }
@@ -739,8 +810,31 @@ async function searchGmail(periodKey) {
     }
     const end = Date.parse(periodEnd(period));
     found.items.forEach((i) => { i.late = i.received >= end; });
-    g.result = { items: found.items.filter((i) => !i.repeat), ignored: found.ignored + repeats };
-    g.picked = new Set(g.result.items.filter((i) => i.bytes && !i.exists && !i.locked));
+    const items = found.items.filter((i) => !i.repeat);
+    // Read the new files now and compare them with what the app has (by supplier, number and
+    // total): the same invoice as another file (e.g. a photo of it) is not offered again.
+    const toRead = items.filter((i) => i.bytes && !i.exists && !i.locked);
+    if (CONFIG.reader && toRead.length) {
+      let done = 0;
+      g.checking = [0, toRead.length];
+      render();
+      const queue = [...toRead];
+      await Promise.all(Array.from({ length: 2 }, async () => {
+        while (queue.length) {
+          const i = queue.shift();
+          try { i.reading = await readBeforeUpload(i.name, i.type, i.bytes); } catch (e) { i.readError = e.message; }
+          const e = i.reading?.extraction;
+          i.have = e ? alreadyHave(e) : null;
+          i.notTax = e ? !isTaxDoc(e) : false;
+          i.target = e ? periodFor(e, periodKey) : periodKey;
+          g.checking = [++done, toRead.length];
+          render();
+        }
+      }));
+      g.checking = null;
+    }
+    g.result = { items, ignored: found.ignored + repeats };
+    g.picked = new Set(items.filter((i) => i.bytes && !i.exists && !i.locked && !i.have && !i.notTax));
   } catch (e) {
     g.error = String(e.message ?? e);
   }
@@ -766,38 +860,47 @@ function gmailView(chosen) {
     h('button', { class: 'primary', disabled: g.busy || null, onclick: start }, g.result && g.period === period ? 'חפש שוב' : 'חפש חשבוניות במייל')),
   h('p', { class: 'note' }, `מיילים שמזכירים חשבונית, שהתקבלו מתחילת התקופה ועד ${EXTRA_DAYS} יום אחרי סופה: קבצים מצורפים, וגם חשבוניות שנשלחו כקישור להורדה. חשבונית שהתאריך שלה אחרי התקופה מועברת אחרי הקריאה לתקופה שלה. הגישה למייל היא לקריאה בלבד.`),
   !canRead ? h('p', { class: 'note' }, 'בפעם הראשונה Google תבקש לאשר לאתר לקרוא את המייל. אם יופיע מסך שהאפליקציה לא אומתה, זה תקין: לוחצים "המשך".') : null,
-  g.busy ? h('div', { class: 'toolbar' }, h('div', { class: 'spinner small' }), h('span', {}, g.progress?.[1] ? `קורא מיילים… ${g.progress[0]} מתוך ${g.progress[1]}` : 'מחפש במייל…'),
+  g.busy ? h('div', { class: 'toolbar' }, h('div', { class: 'spinner small' }), h('span', {}, g.checking ? `קורא את החשבוניות ובודק אם כבר קיימות… ${g.checking[0]} מתוך ${g.checking[1]}`
+    : g.progress?.[1] ? `קורא מיילים… ${g.progress[0]} מתוך ${g.progress[1]}` : 'מחפש במייל…'),
     g.waiting ? h('span', { class: 'muted' }, `Gmail ביקש להאט, ממשיך בעוד ${g.waiting} שניות`) : null) : null,
   g.error ? h('p', { class: 'error' }, g.error) : null);
   if (!g.result || g.period !== period) return page('invoices', 'ייבוא חשבוניות מהמייל', null, null, head);
 
   const items = g.result.items;
-  const fresh = items.filter((i) => i.bytes && !i.exists && !i.locked);
+  const fresh = items.filter((i) => i.bytes && !i.exists && !i.locked && !i.have && !i.notTax);
+  const already = items.filter((i) => i.have);
+  const notTax = items.filter((i) => i.notTax && !i.have);
   const exists = items.filter((i) => i.exists);
   const locked = items.filter((i) => i.locked && !i.exists);
   const linkOnly = items.filter((i) => i.linkOnly);
   const row = (i, check) => h('label', { class: 'row pick' },
     check ? h('input', { type: 'checkbox', checked: g.picked.has(i) || null, onchange: (e) => { e.target.checked ? g.picked.add(i) : g.picked.delete(i); render(); } }) : null,
     h('div', { class: 'row-main' }, h('div', { class: 'row-title' }, i.linkOnly ? i.name : ltr(i.name)),
-      h('div', { class: 'muted' }, [new Date(i.received).toLocaleDateString('he-IL'), i.from.replace(/<.*>/, '').replace(/"/g, '').trim(), i.subject].filter(Boolean).join(' · '))),
-    i.late ? pill('התקבל אחרי סוף התקופה', 'neutral') : null,
+      h('div', { class: 'muted' }, [new Date(i.received).toLocaleDateString('he-IL'), i.from.replace(/<.*>/, '').replace(/"/g, '').trim(), i.subject].filter(Boolean).join(' · ')),
+      i.reading ? h('div', { class: 'reading' }, [i.reading.extraction?.supplier_name, displayDate(i.reading.extraction?.invoice_date),
+        i.reading.extraction?.invoice_number ? '#' + i.reading.extraction.invoice_number : null, i.reading.extraction?.total != null ? money(i.reading.extraction.total) : null].filter(Boolean).join(' · ')) : null),
+    i.have ? pill(`כבר קיימת בתקופה ${parsePeriod(i.have.folder)?.label ?? i.have.folder}${i.have.pending ? ' (ממתינה לטלפון)' : ''}`, 'neutral') : null,
+    i.target && i.target !== g.period ? pill(`תעלה לתקופה ${parsePeriod(i.target)?.label} (לפי התאריך)`, 'info') : null,
+    !i.target && i.late ? pill('התקבל אחרי סוף התקופה', 'neutral') : null,
     i.link && !i.linkOnly ? pill('מקישור', 'info') : null,
     i.linkOnly ? h('a', { class: 'text', href: i.link, target: '_blank', rel: 'noopener noreferrer' }, 'פתח קישור ↗') : null);
   const section = (title, list, tone, check, explain) => list.length ? card(null, h('div', { class: 'period-head' }, h('h2', {}, title), pill(String(list.length), tone)),
     explain ? h('p', { class: 'note' }, explain) : null, list.map((i) => row(i, check))) : null;
   const doImport = () => {
-    const files = [...g.picked].map((i) => new File([i.bytes], i.name, { type: i.type }));
+    const entries = [...g.picked].map((i) => ({ file: new File([i.bytes], i.name, { type: i.type }), reading: i.reading }));
     g.result = null;
     location.hash = `#/upload?period=${period}`;
-    uploadFiles(files, period);
+    uploadFiles(entries, period);
   };
   return page('invoices', 'ייבוא חשבוניות מהמייל', null, null, head,
     h('section', { class: 'card hero' },
       h('div', { class: 'big' }, fresh.length ? `${fresh.length} חשבוניות חדשות` : 'אין חשבוניות חדשות'),
-      h('div', { class: 'muted' }, [`${exists.length} כבר ב-Drive`, locked.length ? `${locked.length} מוגנות בסיסמה` : null, linkOnly.length ? `${linkOnly.length} קישורים שלא ירדו` : null,
+      h('div', { class: 'muted' }, [already.length ? `${already.length} כבר קיימות (כקובץ אחר)` : null, `${exists.length} כבר ב-Drive`, notTax.length ? `${notTax.length} לא חשבוניות מס` : null, locked.length ? `${locked.length} מוגנות בסיסמה` : null, linkOnly.length ? `${linkOnly.length} קישורים שלא ירדו` : null,
         g.result.ignored ? `${g.result.ignored} קבצים אחרים דולגו (לוגו, כפולות, תעודות משלוח)` : null].filter(Boolean).join(' · ')),
       fresh.length ? h('div', { class: 'toolbar' }, h('button', { class: 'primary', disabled: !g.picked.size || null, onclick: doImport }, `העלה ${g.picked.size} חשבוניות לתקופה`)) : null),
     section('חדשות', fresh, 'success', true),
+    section('לא חשבוניות מס', notTax, 'neutral', true, 'קבלות, תעודות משלוח ומסמכים אחרים שאינם חשבונית מס. לא מסומנות להעלאה; אפשר לסמן אם רוצים לשמור אותן.'),
+    section('כבר קיימות', already, 'neutral', false, 'אותה חשבונית (אותו ספק, מספר וסכום) כבר נמצאת באפליקציה, למשל כצילום. לא תעלה שוב.'),
     section('מוגנות בסיסמה', locked, 'warning', false, 'קובץ PDF עם סיסמה: יש לייבא אותו מהטלפון, ששומר את הסיסמאות ופותח אותן.'),
     section('קישורים שלא הצלחתי להוריד', linkOnly, 'warning', false, 'המייל מפנה להורדה באתר של הספק, והקובץ לא ירד אוטומטית. פתח את הקישור, הורד את החשבונית והעלה אותה בהעלאה מהמחשב.'),
     section('כבר ב-Drive', exists, 'neutral', false));
@@ -950,6 +1053,7 @@ function watchHead() {
 window.addEventListener('hashchange', () => { render(); window.scrollTo(0, 0); });
 // Local testing only: http://localhost:<port>/?dev opens a copy of the database next to the page.
 if (['localhost', '127.0.0.1'].includes(location.hostname) && new URLSearchParams(location.search).has('dev')) {
+  window.__dev = { alreadyHave, periodFor, isTaxDoc }; // local testing only
   // The copy's own time (not "now"), so an old copy doesn't look up to date.
   fetch('dev.db', { cache: 'no-store' }).then(async (r) => {
     const time = new Date(r.headers.get('Last-Modified') ?? Date.now()).toISOString();
