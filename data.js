@@ -1,5 +1,5 @@
 // Reads the app's database (the phone's Drive backup, opened with sql.js) into plain objects.
-import { EXCLUDED, PRODUCTS, buildCatalog, checklist, groupFor, parsePeriod } from './logic.js?v=7';
+import { EXCLUDED, PRODUCTS, buildCatalog, checklist, groupFor, parsePeriod } from './logic.js?v=8';
 
 const SEPARATOR = '\n';
 
@@ -78,6 +78,11 @@ export class Data {
         missingFixed: fixed.reduce((s, c) => s + c.missing, 0),
       };
     }).sort((a, b) => b.folder_name.localeCompare(a.folder_name));
+  }
+
+  /** Content hashes of every file the app ever took in (duplicates and non-invoices too). */
+  knownHashes() {
+    return new Set(rows(this.db, 'SELECT sha256 FROM documents WHERE sha256 IS NOT NULL').map((r) => r.sha256));
   }
 
   document(id) {

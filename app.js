@@ -1,14 +1,14 @@
 // The desktop web view of the app: reads the phone's database backup from Google Drive (view
 // only) and shows the periods, invoices and the suppliers & products dashboard.
-import { CONFIG } from './config.js?v=7';
-import { Data } from './data.js?v=7';
-import { timeChart } from './charts.js?v=7';
-import { account, matchAll, merge, parseStatement } from './card.js?v=7';
-import { GMAIL_SCOPE, findInvoices } from './gmail.js?v=7';
+import { CONFIG } from './config.js?v=8';
+import { Data } from './data.js?v=8';
+import { timeChart } from './charts.js?v=8';
+import { account, matchAll, merge, parseStatement } from './card.js?v=8';
+import { GMAIL_SCOPE, findInvoices } from './gmail.js?v=8';
 import {
   ALL_KINDS, EXCLUDED, FIXED, OCCASIONAL, PRODUCTS, RUNNING, cumulative, displayDate, displayPeriod, parsePeriod,
   quantityByMonth, sameDayTogether, withVat,
-} from './logic.js?v=7';
+} from './logic.js?v=8';
 
 const SQL_JS = 'https://cdn.jsdelivr.net/npm/sql.js@1.10.3/dist/';
 const DRIVE = 'https://www.googleapis.com/drive/v3/files';
@@ -617,6 +617,16 @@ function uploadView(chosen) {
     list);
 }
 
+/**
+ * Every file the app already has: in the database (also duplicates it removed) and in Drive,
+ * trash included. A file found again (e.g. the same email attachment) is never uploaded and read twice.
+ */
+async function knownHashes() {
+  const inDrive = (await driveList("appProperties has { key='app' and value='invoice-collector' }", 'appProperties'))
+    .map((f) => f.appProperties?.sha256).filter(Boolean);
+  return new Set([...state.data.knownHashes(), ...inDrive]);
+}
+
 async function sha256Hex(buf) {
   return [...new Uint8Array(await crypto.subtle.digest('SHA-256', buf))].map((b) => b.toString(16).padStart(2, '0')).join('');
 }
@@ -651,8 +661,7 @@ async function uploadFiles(files, periodKey) {
   render();
   const set = (u, status, tone, name) => { u.status = status; u.tone = tone; if (name) u.name = name; render(); };
   try {
-    const hashes = new Set((await driveList("appProperties has { key='app' and value='invoice-collector' } and trashed=false", 'appProperties'))
-      .map((f) => f.appProperties?.sha256).filter(Boolean));
+    const hashes = await knownHashes();
     const root = await folder('חשבוניות', 'root');
     const target = await folder(period.label, await folder(String(period.year), root));
     const taken = new Set((await driveList(`'${target}' in parents and trashed=false`, 'name')).map((f) => f.name.replace(/\.[^.]*$/, '')));
@@ -708,8 +717,7 @@ async function searchGmail(periodKey) {
   try {
     const period = parsePeriod(periodKey);
     const found = await findInvoices(state.token, period, fetchLinkThroughServer, (d, t) => { g.progress = [d, t]; render(); });
-    const hashes = new Set((await driveList("appProperties has { key='app' and value='invoice-collector' } and trashed=false", 'appProperties'))
-      .map((f) => f.appProperties?.sha256).filter(Boolean));
+    const hashes = await knownHashes();
     const seen = new Set();
     let repeats = 0;
     for (const it of found.items) {
