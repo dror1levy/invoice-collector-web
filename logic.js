@@ -21,7 +21,8 @@ export function sameName(a, b) {
 
 // --- InvoiceRules.kt ---
 export function normalizeTaxId(v) {
-  const digits = String(v ?? '').replace(/\D/g, '');
+  let digits = String(v ?? '').replace(/\D/g, '');
+  if (digits.length === 10 && digits.startsWith('0')) digits = digits.slice(1); // "0513770669"
   return digits ? digits.padStart(9, '0') : null;
 }
 export const round2 = (n) => Math.round(n * 100) / 100;

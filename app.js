@@ -1,14 +1,14 @@
 // The desktop web view of the app: reads the phone's database backup from Google Drive (view
 // only) and shows the periods, invoices and the suppliers & products dashboard.
-import { CONFIG } from './config.js?v=17';
-import { Data } from './data.js?v=17';
-import { timeChart } from './charts.js?v=17';
-import { account, matchAll, merge, parseStatement } from './card.js?v=17';
-import { EXTRA_DAYS, GMAIL_SCOPE, findInvoices, periodEnd } from './gmail.js?v=17';
+import { CONFIG } from './config.js?v=18';
+import { Data } from './data.js?v=18';
+import { timeChart } from './charts.js?v=18';
+import { account, matchAll, merge, parseStatement } from './card.js?v=18';
+import { EXTRA_DAYS, GMAIL_SCOPE, findInvoices, periodEnd } from './gmail.js?v=18';
 import {
   ALL_KINDS, EXCLUDED, FIXED, OCCASIONAL, PRODUCTS, RUNNING, cumulative, displayDate, displayPeriod, parsePeriod,
   normalizeTaxId, quantityByMonth, sameDayTogether, sameName, withVat,
-} from './logic.js?v=17';
+} from './logic.js?v=18';
 
 const SQL_JS = 'https://cdn.jsdelivr.net/npm/sql.js@1.10.3/dist/';
 const DRIVE = 'https://www.googleapis.com/drive/v3/files';
@@ -47,6 +47,7 @@ const ISSUE = {
   vat_rate_unexpected: 'שיעור מע״מ לא צפוי', lines_sum_mismatch: 'סכום השורות לא תואם לסה״כ', tax_id_invalid: 'מספר עוסק לא תקין',
   date_outside_period: 'התאריך לא בתוך התקופה', duplicate_invoice: 'חשבונית עם אותו מספר מאותו ספק כבר קיימת', foreign_currency: 'מטבע חוץ',
   not_reported_before: 'חשבונית מתקופה אחרת שלא דווחה בתקופות קודמות',
+  date_year_corrected: 'השנה בתאריך תוקנה (נקראה כנראה לא נכון מהצילום)',
 };
 const issueText = (code) => code.startsWith('reported_in:')
   ? `כבר דווחה בתקופה ${parsePeriod(code.slice(12))?.label ?? code.slice(12)} ${parsePeriod(code.slice(12))?.year ?? ''}, ולכן לא נכללת בדוח הזה`
