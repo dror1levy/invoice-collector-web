@@ -1,5 +1,5 @@
 // Reads the app's database (the phone's Drive backup, opened with sql.js) into plain objects.
-import { EXCLUDED, PRODUCTS, beforeVat, buildCatalog, checklist, groupFor, linesIncludeVat, parsePeriod, vatRateFor } from './logic.js?v=19';
+import { EXCLUDED, PRODUCTS, beforeVat, buildCatalog, checklist, groupFor, linesIncludeVat, parsePeriod, vatRateFor } from './logic.js?v=20';
 
 const SEPARATOR = '\n';
 

@@ -1,14 +1,14 @@
 // The desktop web view of the app: reads the phone's database backup from Google Drive (view
 // only) and shows the periods, invoices and the suppliers & products dashboard.
-import { CONFIG } from './config.js?v=19';
-import { Data } from './data.js?v=19';
-import { timeChart } from './charts.js?v=19';
-import { account, matchAll, merge, parseStatement } from './card.js?v=19';
-import { EXTRA_DAYS, GMAIL_SCOPE, findInvoices, periodEnd } from './gmail.js?v=19';
+import { CONFIG } from './config.js?v=20';
+import { Data } from './data.js?v=20';
+import { timeChart } from './charts.js?v=20';
+import { account, matchAll, merge, parseStatement } from './card.js?v=20';
+import { EXTRA_DAYS, GMAIL_SCOPE, findInvoices, periodEnd } from './gmail.js?v=20';
 import {
   ALL_KINDS, EXCLUDED, FIXED, OCCASIONAL, PRODUCTS, RUNNING, cumulative, displayDate, displayPeriod, parsePeriod,
   normalizeTaxId, quantityByMonth, sameDayTogether, sameName, withVat,
-} from './logic.js?v=19';
+} from './logic.js?v=20';
 
 const SQL_JS = 'https://cdn.jsdelivr.net/npm/sql.js@1.10.3/dist/';
 const DRIVE = 'https://www.googleapis.com/drive/v3/files';
@@ -488,16 +488,16 @@ function productsView(query = '') {
     search, results);
 }
 
-/** Products whose last price rose over 5% (before VAT), bought in the last 90 days, newest first (as on the phone). */
+/** Products whose last price rose at all (before VAT), bought in the last 90 days, newest first (as on the phone). */
 function recentIncreases(suppliers) {
   const since = new Date(Date.now() - 90 * 86400000).toISOString().slice(0, 10);
   const ups = suppliers.flatMap((s) => s.products.map((p) => [s, p]))
-    .filter(([, p]) => (p.lastChangePercent ?? 0) >= 5 && p.lastChangeIsPrice && (p.lastDate ?? '') >= since)
+    .filter(([, p]) => (p.lastChangePercent ?? 0) >= 0.01 && p.lastChangeIsPrice && (p.lastDate ?? '') >= since)
     .sort((a, b) => (b[1].lastDate ?? '').localeCompare(a[1].lastDate ?? '') || b[1].lastChangePercent - a[1].lastChangePercent);
   if (!ups.length) return null;
   return h('details', { class: 'card section', open: true },
     h('summary', {}, h('span', {}, 'התייקרויות אחרונות'), pill(String(ups.length), 'danger')),
-    h('p', { class: 'note' }, 'מוצרים שהמחיר האחרון שלהם עלה ביותר מ-5% לעומת הקנייה הקודמת, ונקנו ב-90 הימים האחרונים.'),
+    h('p', { class: 'note' }, 'מוצרים שהמחיר האחרון שלהם עלה לעומת הקנייה הקודמת (כל עלייה), ונקנו ב-90 הימים האחרונים.'),
     ups.map(([s, p]) => [h('div', { class: 'supplier-tag' }, s.title), productRow(s, p)]));
 }
 

@@ -1,7 +1,7 @@
 // The credit card check, ported from the Android code (core/CardStatement.kt, core/CardMatcher.kt)
 // so the web shows the same result: card charges against invoices, suppliers on account checked
 // by the invoices that add up to each payment. Pure functions, no DOM.
-import { normalizeName, normalizeTaxId, parseEntry, sameName } from './logic.js?v=19';
+import { normalizeName, normalizeTaxId, parseEntry, sameName } from './logic.js?v=20';
 
 const DAY = 86400000;
 const days = (a, b) => Math.round((Date.parse(b) - Date.parse(a)) / DAY); // b - a, ISO dates
