@@ -1,12 +1,12 @@
 // The desktop web view of the app: reads the phone's database backup from Google Drive (view
 // only) and shows the periods, invoices and the suppliers & products dashboard.
-import { CONFIG } from './config.js';
-import { Data } from './data.js';
-import { timeChart } from './charts.js';
+import { CONFIG } from './config.js?v=3';
+import { Data } from './data.js?v=3';
+import { timeChart } from './charts.js?v=3';
 import {
   ALL_KINDS, EXCLUDED, FIXED, OCCASIONAL, PRODUCTS, RUNNING, cumulative, displayDate, displayPeriod, parsePeriod,
   quantityByMonth, sameDayTogether, withVat,
-} from './logic.js';
+} from './logic.js?v=3';
 
 const SQL_JS = 'https://cdn.jsdelivr.net/npm/sql.js@1.10.3/dist/';
 const DRIVE = 'https://www.googleapis.com/drive/v3/files';
