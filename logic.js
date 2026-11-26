@@ -164,6 +164,8 @@ export function buildCatalog(rows, invoices) {
       totalQuantity: purchases.reduce((s, p) => s + (p.quantity ?? 0), 0),
       purchaseCount: new Set(purchases.map((p) => p.documentId)).size,
       lastChangePercent: before ? ((lastPrice - before) / before) * 100 : null,
+      // A category line (quantity 1, the whole sum as the price) swinging over 30% is not a price change (as on the phone).
+      lastChangeIsPrice: priced.length >= 2 && !(priced.slice(-2).every((x) => (x.quantity ?? 1) <= 1) && Math.abs(before ? ((lastPrice - before) / before) * 100 : 0) > 30),
     });
   }
   const out = [...byGroup.values()];
