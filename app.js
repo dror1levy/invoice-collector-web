@@ -1,14 +1,14 @@
 // The desktop web view of the app: reads the phone's database backup from Google Drive (view
 // only) and shows the periods, invoices and the suppliers & products dashboard.
-import { CONFIG } from './config.js?v=16';
-import { Data } from './data.js?v=16';
-import { timeChart } from './charts.js?v=16';
-import { account, matchAll, merge, parseStatement } from './card.js?v=16';
-import { EXTRA_DAYS, GMAIL_SCOPE, findInvoices, periodEnd } from './gmail.js?v=16';
+import { CONFIG } from './config.js?v=17';
+import { Data } from './data.js?v=17';
+import { timeChart } from './charts.js?v=17';
+import { account, matchAll, merge, parseStatement } from './card.js?v=17';
+import { EXTRA_DAYS, GMAIL_SCOPE, findInvoices, periodEnd } from './gmail.js?v=17';
 import {
   ALL_KINDS, EXCLUDED, FIXED, OCCASIONAL, PRODUCTS, RUNNING, cumulative, displayDate, displayPeriod, parsePeriod,
   normalizeTaxId, quantityByMonth, sameDayTogether, sameName, withVat,
-} from './logic.js?v=16';
+} from './logic.js?v=17';
 
 const SQL_JS = 'https://cdn.jsdelivr.net/npm/sql.js@1.10.3/dist/';
 const DRIVE = 'https://www.googleapis.com/drive/v3/files';
@@ -514,10 +514,12 @@ function productView(groupId, key) {
   const s = state.data.catalog().find((x) => x.groupId === groupId);
   const p = s?.products.find((x) => x.key === key);
   if (!p) return page('products', 'המוצר לא נמצא', null, vatSwitch());
-  const spent = p.purchases.reduce((t, b) => t + (b.amount != null ? shown(b.amount, b.date) : 0), 0);
+  // Spending is by tax invoices; orders without one show in prices and quantities only.
+  const spent = p.purchases.filter((b) => !b.orderNumber).reduce((t, b) => t + (b.amount != null ? shown(b.amount, b.date) : 0), 0);
   const dated = p.purchases.filter((b) => b.date);
-  const spending = sameDayTogether(dated.filter((b) => b.amount != null).map((b) => ({ date: b.date.slice(0, 10), value: shown(b.amount, b.date), detail: b.quantity != null ? `${qty(b.quantity)} יח׳` : null })), (n) => `${n} רכישות`);
-  const prices = [...new Map(dated.filter((b) => b.unitPrice != null).map((b) => [b.date.slice(0, 10), { date: b.date.slice(0, 10), value: shown(b.unitPrice, b.date) }])).values()];
+  const spending = sameDayTogether(dated.filter((b) => b.amount != null && !b.orderNumber).map((b) => ({ date: b.date.slice(0, 10), value: shown(b.amount, b.date), detail: b.quantity != null ? `${qty(b.quantity)} יח׳` : null })), (n) => `${n} רכישות`);
+  const prices = [...new Map(dated.filter((b) => b.unitPrice != null).map((b) => [b.date.slice(0, 10),
+    { date: b.date.slice(0, 10), value: shown(b.unitPrice, b.date), detail: b.orderNumber ? `מהזמנה #${b.orderNumber}` : null }])).values()];
   const months = quantityByMonth(p).map(([m, q]) => ({ date: m + '-01', value: q }));
   const priceBox = h('div', { class: 'chart' }), qtyBox = h('div', { class: 'chart' });
   requestAnimationFrame(() => {
@@ -537,7 +539,8 @@ function productView(groupId, key) {
     card('כל הקניות', h('table', {},
       h('thead', {}, h('tr', {}, h('th', {}, 'תאריך'), h('th', {}, 'חשבונית'), h('th', {}, 'כמות'), h('th', {}, 'מחיר ליח׳'), h('th', {}, 'סכום'))),
       h('tbody', {}, [...p.purchases].reverse().map((b) => h('tr', {},
-        h('td', {}, displayDate(b.date) ?? '—'), h('td', {}, h('a', { href: `#/doc/${b.documentId}` }, b.invoiceNumber ? '#' + b.invoiceNumber : 'פתח')),
+        h('td', {}, displayDate(b.date) ?? '—'), h('td', {}, b.orderNumber ? h('span', { class: 'muted' }, `הזמנה #${b.orderNumber} · בלי חשבונית`)
+          : h('a', { href: `#/doc/${b.documentId}` }, b.invoiceNumber ? '#' + b.invoiceNumber : 'פתח')),
         h('td', {}, b.quantity == null ? '' : qty(b.quantity)), h('td', {}, money(shown(b.unitPrice, b.date))), h('td', {}, money(shown(b.amount, b.date))))))), vatNote()));
 }
 

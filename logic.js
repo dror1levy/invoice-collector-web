@@ -27,6 +27,15 @@ export function normalizeTaxId(v) {
 export const round2 = (n) => Math.round(n * 100) / 100;
 export const vatRateFor = (date) => (date && date < '2025-01-01' ? 17 : 18);
 export const withVat = (beforeVat, date) => round2(beforeVat * (1 + vatRateFor(date) / 100));
+export const beforeVat = (amount, includesVat, rate) => (amount == null ? null : includesVat ? round2(amount / (1 + rate / 100)) : amount);
+/** Whether a reading's line totals include VAT, by what they add up to (InvoiceRules.linesIncludeVat). */
+export function linesIncludeVat(e) {
+  const lines = e.lines ?? [];
+  if (!lines.length || lines.some((l) => l.line_total == null)) return null;
+  const sum = lines.reduce((s, l) => s + l.line_total, 0);
+  const near = (t) => t != null && Math.abs(sum - t) <= Math.max(1, Math.abs(t) * 0.01);
+  return near(e.amount_before_vat) ? false : near(e.total) ? true : null;
+}
 
 // --- RecurringInvoices.kt ---
 export function parseEntry(raw) {
@@ -138,7 +147,7 @@ export function buildCatalog(rows, invoices) {
     list.sort((a, b) => (a.invoiceDate ?? '').localeCompare(b.invoiceDate ?? '') || a.documentId - b.documentId);
     const last = list[list.length - 1];
     const purchases = list.map((r) => ({
-      date: r.invoiceDate, quantity: r.quantity, unitPrice: r.unitPrice, documentId: r.documentId, invoiceNumber: r.invoiceNumber,
+      date: r.invoiceDate, quantity: r.quantity, unitPrice: r.unitPrice, documentId: r.documentId, invoiceNumber: r.invoiceNumber, orderNumber: r.orderNumber ?? null,
       amount: r.lineTotal ?? (r.quantity != null && r.unitPrice != null ? round2(r.quantity * r.unitPrice) : null),
     }));
     const priced = purchases.filter((p) => p.unitPrice != null);

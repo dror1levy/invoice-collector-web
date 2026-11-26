@@ -1,5 +1,5 @@
 // Reads the app's database (the phone's Drive backup, opened with sql.js) into plain objects.
-import { EXCLUDED, PRODUCTS, buildCatalog, checklist, groupFor, parsePeriod } from './logic.js?v=16';
+import { EXCLUDED, PRODUCTS, beforeVat, buildCatalog, checklist, groupFor, linesIncludeVat, parsePeriod, vatRateFor } from './logic.js?v=17';
 
 const SEPARATOR = '\n';
 
@@ -122,6 +122,24 @@ export class Data {
         groupId: d.group.id, groupTitle: d.group.title, documentId: d.id, date: d.invoice_date, number: d.invoice_number,
         amountBeforeVat: d.amount_before_vat, total: d.total,
       });
+    }
+    // Order emails whose tax invoice isn't in the app: their prices and quantities count in the
+    // product's history (marked), their amounts don't (as on the phone).
+    if (this.hasNotes) {
+      for (const g of this.groups.filter((x) => x.deliveryNoteLines && x.kind === PRODUCTS)) {
+        for (const n of rows(this.db, `SELECT id, sha256, raw_extraction, note_date, email_date FROM delivery_notes
+             WHERE group_id = ? AND status = 'read' AND invoice_id IS NULL AND sha256 LIKE 'order:%' AND total > 0`, [g.id])) {
+          let e;
+          try { e = JSON.parse(n.raw_extraction); } catch { continue; }
+          const date = n.note_date ?? n.email_date, rate = vatRateFor(date);
+          const incl = linesIncludeVat(e) ?? !!e.line_prices_include_vat;
+          for (const l of (e.lines ?? []).filter((x) => x.kind === 'product' && x.description?.trim())) {
+            lines.push({ groupId: g.id, groupTitle: g.title, documentId: -n.id, invoiceDate: date, invoiceNumber: null, description: l.description,
+              sku: l.sku, quantity: l.quantity, unitPrice: beforeVat(l.unit_price, incl, rate), lineTotal: beforeVat(l.line_total, incl, rate),
+              orderNumber: n.sha256.split(':').pop() });
+          }
+        }
+      }
     }
     const catalog = buildCatalog(lines, invoices);
     for (const s of catalog) s.notes = this.noteStats(s.groupId);
