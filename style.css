@@ -145,3 +145,4 @@ td:nth-child(n+3), th:nth-child(n+3) { white-space: nowrap; }
   .field { grid-template-columns: 100px 1fr; }
 }
 details > summary > :first-child { flex: 1; }
+.top-actions { display: flex; gap: 2px; }

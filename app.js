@@ -1,12 +1,12 @@
 // The desktop web view of the app: reads the phone's database backup from Google Drive (view
 // only) and shows the periods, invoices and the suppliers & products dashboard.
-import { CONFIG } from './config.js?v=3';
-import { Data } from './data.js?v=3';
-import { timeChart } from './charts.js?v=3';
+import { CONFIG } from './config.js?v=4';
+import { Data } from './data.js?v=4';
+import { timeChart } from './charts.js?v=4';
 import {
   ALL_KINDS, EXCLUDED, FIXED, OCCASIONAL, PRODUCTS, RUNNING, cumulative, displayDate, displayPeriod, parsePeriod,
   quantityByMonth, sameDayTogether, withVat,
-} from './logic.js?v=3';
+} from './logic.js?v=4';
 
 const SQL_JS = 'https://cdn.jsdelivr.net/npm/sql.js@1.10.3/dist/';
 const DRIVE = 'https://www.googleapis.com/drive/v3/files';
@@ -65,7 +65,19 @@ function modes(options, selected, onSelect) {
 }
 
 // --- Google sign-in and the backup ----------------------------------------------------------
+// Signed in once, the page stays signed in until "התנתק": Google's access token (valid about an
+// hour) is kept in this browser, and so is the last copy of the data, so a refresh shows it at
+// once. After the hour, "רענן" gets a new token without asking again (the access was already granted).
 let tokenClient;
+const AUTH_KEY = 'auth', SIGNED_IN_KEY = 'signedIn';
+
+function savedToken() {
+  try {
+    const a = JSON.parse(localGet(AUTH_KEY) ?? 'null');
+    return a && a.expires > Date.now() + 60000 ? a.token : null;
+  } catch { return null; }
+}
+
 function signIn() {
   if (!CONFIG.clientId) { show(errorView('חסר מזהה OAuth לאתר (config.js). אפשר בינתיים לפתוח קובץ גיבוי מהמחשב.')); return; }
   tokenClient ??= google.accounts.oauth2.initTokenClient({
@@ -73,14 +85,57 @@ function signIn() {
     callback: (resp) => {
       if (resp.error) { show(errorView('ההתחברות נכשלה: ' + resp.error)); return; }
       state.token = resp.access_token;
+      localSet(AUTH_KEY, JSON.stringify({ token: resp.access_token, expires: Date.now() + (+resp.expires_in || 3600) * 1000 }));
+      localSet(SIGNED_IN_KEY, '1');
       loadFromDrive();
     },
   });
-  tokenClient.requestAccessToken();
+  // A returning user already granted access: Google's window only flashes, no questions.
+  tokenClient.requestAccessToken(localGet(SIGNED_IN_KEY) === '1' ? { prompt: '' } : {});
 }
+
+function signOut() {
+  if (state.token) { try { google.accounts.oauth2.revoke(state.token, () => {}); } catch { /* offline */ } }
+  state.token = null;
+  state.data = null;
+  try { localStorage.removeItem(AUTH_KEY); localStorage.removeItem(SIGNED_IN_KEY); } catch { /* */ }
+  cache.clear();
+  history.replaceState(null, '', location.pathname);
+  render();
+}
+
+// The last data downloaded, kept in this browser (IndexedDB) so a refresh doesn't need Google.
+const cache = {
+  db() {
+    return new Promise((resolve, reject) => {
+      const r = indexedDB.open('invoice-collector', 1);
+      r.onupgradeneeded = () => r.result.createObjectStore('backup');
+      r.onsuccess = () => resolve(r.result);
+      r.onerror = () => reject(r.error);
+    });
+  },
+  async run(mode, fn) {
+    const db = await this.db();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction('backup', mode);
+      const req = fn(tx.objectStore('backup'));
+      tx.oncomplete = () => resolve(req?.result);
+      tx.onerror = () => reject(tx.error);
+    });
+  },
+  async get() { try { return await this.run('readonly', (s) => s.get('last')); } catch { return null; } },
+  async put(bytes, time) { try { await this.run('readwrite', (s) => s.put({ bytes, time }, 'last')); } catch { /* private mode */ } },
+  async clear() { try { await this.run('readwrite', (s) => s.clear()); } catch { /* */ } },
+};
 
 async function drive(url) {
   const r = await fetch(url, { headers: { Authorization: 'Bearer ' + state.token } });
+  if (r.status === 401) {
+    // The token ran out: forget it; "רענן" / "התחבר" gets a new one.
+    state.token = null;
+    try { localStorage.removeItem(AUTH_KEY); } catch { /* */ }
+    throw new Error('החיבור ל-Google פג. לחץ "רענן" כדי להתחבר שוב.');
+  }
   if (!r.ok) throw new Error(`Drive ${r.status}: ${(await r.text()).slice(0, 200)}`);
   return r;
 }
@@ -93,6 +148,7 @@ async function loadFromDrive() {
     const file = list.files?.[0];
     if (!file) { show(errorView('לא נמצא גיבוי של האפליקציה ב-Drive. פתח את האפליקציה בטלפון, והגיבוי ייווצר אחרי הקריאה הבאה.')); return; }
     const bytes = new Uint8Array(await (await drive(`${DRIVE}/${file.id}?alt=media`)).arrayBuffer());
+    await cache.put(bytes, file.modifiedTime);
     await open(bytes, 'drive', file.modifiedTime);
   } catch (e) {
     show(errorView(String(e.message ?? e)));
@@ -139,7 +195,9 @@ function topBar(active) {
   return h('header', { class: 'top' },
     h('div', { class: 'brand' }, h('a', { href: '#/' }, 'איסוף חשבוניות'), h('span', { class: 'fresh' }, fresh)),
     h('nav', {}, h('a', { href: '#/', class: active === 'invoices' ? 'on' : '' }, 'חשבוניות'), h('a', { href: '#/products', class: active === 'products' ? 'on' : '' }, 'ספקים ומוצרים')),
-    state.source === 'drive' ? h('button', { class: 'text', onclick: loadFromDrive, title: 'טען שוב את הגיבוי' }, 'רענן') : null);
+    ['drive', 'cache'].includes(state.source) ? h('div', { class: 'top-actions' },
+      h('button', { class: 'text', onclick: () => (state.token ? loadFromDrive() : signIn()), title: 'טען שוב את הגיבוי מ-Drive' }, 'רענן'),
+      h('button', { class: 'text', onclick: signOut, title: 'התנתק ומחק את הנתונים מהדפדפן הזה' }, 'התנתק')) : null);
 }
 
 function page(active, title, subtitle, sticky, ...body) {
@@ -389,5 +447,13 @@ if (['localhost', '127.0.0.1'].includes(location.hostname) && new URLSearchParam
     await open(new Uint8Array(await r.arrayBuffer()), 'dev', time);
   });
 } else {
-  render();
+  start();
+}
+
+async function start() {
+  state.token = savedToken();
+  if (state.token) { loadFromDrive(); return; }
+  const last = localGet(SIGNED_IN_KEY) === '1' ? await cache.get() : null;
+  if (last) await open(last.bytes, 'cache', last.time);
+  else render();
 }
