@@ -1,13 +1,14 @@
 // The desktop web view of the app: reads the phone's database backup from Google Drive (view
 // only) and shows the periods, invoices and the suppliers & products dashboard.
-import { CONFIG } from './config.js?v=5';
-import { Data } from './data.js?v=5';
-import { timeChart } from './charts.js?v=5';
-import { account, matchAll, merge, parseStatement } from './card.js?v=5';
+import { CONFIG } from './config.js?v=6';
+import { Data } from './data.js?v=6';
+import { timeChart } from './charts.js?v=6';
+import { account, matchAll, merge, parseStatement } from './card.js?v=6';
+import { GMAIL_SCOPE, findInvoices } from './gmail.js?v=6';
 import {
   ALL_KINDS, EXCLUDED, FIXED, OCCASIONAL, PRODUCTS, RUNNING, cumulative, displayDate, displayPeriod, parsePeriod,
   quantityByMonth, sameDayTogether, withVat,
-} from './logic.js?v=5';
+} from './logic.js?v=6';
 
 const SQL_JS = 'https://cdn.jsdelivr.net/npm/sql.js@1.10.3/dist/';
 const DRIVE = 'https://www.googleapis.com/drive/v3/files';
@@ -75,24 +76,29 @@ const AUTH_KEY = 'auth', SIGNED_IN_KEY = 'signedIn';
 function savedToken() {
   try {
     const a = JSON.parse(localGet(AUTH_KEY) ?? 'null');
-    return a && a.expires > Date.now() + 60000 ? a.token : null;
+    if (!(a && a.expires > Date.now() + 60000)) return null;
+    state.scopes = a.scopes ?? '';
+    return a.token;
   } catch { return null; }
 }
 
-function signIn() {
+function signIn(extraScope) {
   if (!CONFIG.clientId) { show(errorView('חסר מזהה OAuth לאתר (config.js). אפשר בינתיים לפתוח קובץ גיבוי מהמחשב.')); return; }
   tokenClient ??= google.accounts.oauth2.initTokenClient({
-    client_id: CONFIG.clientId, scope: SCOPE,
+    client_id: CONFIG.clientId, scope: SCOPE, include_granted_scopes: true,
     callback: (resp) => {
       if (resp.error) { show(errorView('ההתחברות נכשלה: ' + resp.error)); return; }
       state.token = resp.access_token;
-      localSet(AUTH_KEY, JSON.stringify({ token: resp.access_token, expires: Date.now() + (+resp.expires_in || 3600) * 1000 }));
+      state.scopes = resp.scope ?? '';
+      localSet(AUTH_KEY, JSON.stringify({ token: resp.access_token, scopes: state.scopes, expires: Date.now() + (+resp.expires_in || 3600) * 1000 }));
       localSet(SIGNED_IN_KEY, '1');
-      loadFromDrive();
+      if (state.data && state.afterSignIn) { const next = state.afterSignIn; state.afterSignIn = null; render(); next(); }
+      else loadFromDrive();
     },
   });
   // A returning user already granted access: Google's window only flashes, no questions.
-  tokenClient.requestAccessToken(localGet(SIGNED_IN_KEY) === '1' ? { prompt: '' } : {});
+  const scope = extraScope ? `${SCOPE} ${extraScope}` : undefined;
+  tokenClient.requestAccessToken({ ...(localGet(SIGNED_IN_KEY) === '1' && !extraScope ? { prompt: '' } : {}), ...(scope ? { scope } : {}) });
 }
 
 function signOut() {
@@ -180,7 +186,7 @@ function errorView(text) { return h('div', { class: 'center' }, card(null, h('p'
 function welcomeActions() {
   const input = h('input', { type: 'file', accept: '.db,application/x-sqlite3,application/octet-stream', hidden: true, onchange: (e) => e.target.files[0] && openFile(e.target.files[0]) });
   return h('div', { class: 'actions' },
-    h('button', { class: 'primary', onclick: signIn }, 'התחבר עם Google'),
+    h('button', { class: 'primary', onclick: () => signIn() }, 'התחבר עם Google'),
     h('button', { class: 'text', onclick: () => input.click() }, 'פתח קובץ גיבוי מהמחשב'), input);
 }
 
@@ -211,7 +217,7 @@ function page(active, title, subtitle, sticky, ...body) {
 function homeView() {
   const periods = state.data.periods();
   return page('invoices', 'תקופות דיווח', null, null,
-    h('div', { class: 'toolbar' }, h('a', { class: 'button tonal', href: '#/upload' }, '⬆ העלאת חשבוניות')),
+    h('div', { class: 'toolbar' }, h('a', { class: 'button tonal', href: '#/upload' }, '⬆ העלאת חשבוניות'), h('a', { class: 'button tonal', href: '#/gmail' }, '✉ ייבוא מהמייל')),
     h('div', { class: 'grid' }, periods.map((p) => h('a', { class: 'card link period', href: `#/period/${p.folder_name}` },
       h('div', { class: 'period-head' }, h('h2', {}, ltr(p.period?.label ?? p.folder_name)), h('span', { class: 'muted' }, p.period?.year ?? '')),
       h('div', { class: 'big' }, money(p.total)),
@@ -259,6 +265,7 @@ function periodView(folder) {
     h('section', { class: 'card hero' }, kpis([['סה״כ', money(p.total)], ['לפני מע״מ', money(p.beforeVat)], ['מע״מ', money(p.vat)], ['חשבוניות', String(p.count)]])),
     h('div', { class: 'toolbar' },
       h('a', { class: 'button tonal', href: `#/upload?period=${folder}` }, '⬆ העלאת חשבוניות לתקופה'),
+      h('a', { class: 'button tonal', href: `#/gmail?period=${folder}` }, '✉ ייבוא מהמייל'),
       h('a', { class: 'button tonal', href: `#/card/${folder}` }, 'הצלבה מול כרטיס אשראי'),
       h('button', { class: 'button tonal', onclick: () => exportPeriod(p) }, '⬇ ייצוא ל-Excel')),
     fixed,
@@ -585,7 +592,7 @@ function uploadView(chosen) {
     options.map((f) => h('option', { value: f, selected: f === period ? true : null }, `תקופה ${parsePeriod(f)?.label ?? f} ${parsePeriod(f)?.year ?? ''}`)));
   if (!state.token) {
     return page('invoices', 'העלאת חשבוניות', null, null, card(null, h('p', {}, 'כדי להעלות קבצים ל-Drive צריך להתחבר עם Google.'),
-      h('div', { class: 'actions' }, h('button', { class: 'primary', onclick: signIn }, 'התחבר עם Google'))));
+      h('div', { class: 'actions' }, h('button', { class: 'primary', onclick: () => signIn() }, 'התחבר עם Google'))));
   }
   const input = h('input', { type: 'file', accept: UPLOAD_TYPES.join(','), multiple: true, hidden: true, onchange: (e) => uploadFiles([...e.target.files], select.value) });
   const drop = h('div', { class: 'dropzone', onclick: () => input.click(),
@@ -673,6 +680,95 @@ async function uploadFiles(files, periodKey) {
   }
 }
 
+// --- importing from Gmail (links downloaded by the server function) ---------------------------
+state.gmail = { period: null, busy: false, progress: null, result: null, error: null, picked: new Set() };
+
+async function fetchLinkThroughServer(links) {
+  if (!CONFIG.linkFetcher) return null;
+  const r = await fetch(CONFIG.linkFetcher, { method: 'POST', headers: { Authorization: 'Bearer ' + state.token, 'Content-Type': 'application/json' }, body: JSON.stringify({ links }) });
+  return r.ok ? r.json() : null;
+}
+
+async function searchGmail(periodKey) {
+  const g = state.gmail;
+  Object.assign(g, { period: periodKey, busy: true, progress: [0, 0], result: null, error: null });
+  render();
+  try {
+    const period = parsePeriod(periodKey);
+    const found = await findInvoices(state.token, period, fetchLinkThroughServer, (d, t) => { g.progress = [d, t]; render(); });
+    const hashes = new Set((await driveList("appProperties has { key='app' and value='invoice-collector' } and trashed=false", 'appProperties'))
+      .map((f) => f.appProperties?.sha256).filter(Boolean));
+    const seen = new Set();
+    let repeats = 0;
+    for (const it of found.items) {
+      if (!it.bytes) continue;
+      it.hash = await sha256Hex(it.bytes);
+      it.exists = hashes.has(it.hash);
+      if (seen.has(it.hash)) { it.repeat = true; repeats++; }
+      seen.add(it.hash);
+    }
+    g.result = { items: found.items.filter((i) => !i.repeat), ignored: found.ignored + repeats };
+    g.picked = new Set(g.result.items.filter((i) => i.bytes && !i.exists && !i.locked));
+  } catch (e) {
+    g.error = String(e.message ?? e);
+  }
+  g.busy = false;
+  render();
+}
+
+function gmailView(chosen) {
+  const g = state.gmail;
+  const known = state.data.periods().map((x) => x.folder_name);
+  const now = periodOfDate(new Date());
+  const period = chosen && /^\d{4}-\d{2}-\d{2}$/.test(chosen) ? chosen : g.period ?? now;
+  const options = [...new Set([now, period, ...known])].sort().reverse();
+  const select = h('select', { class: 'select', disabled: g.busy || null, onchange: (e) => { location.hash = `#/gmail?period=${e.target.value}`; } },
+    options.map((f) => h('option', { value: f, selected: f === period ? true : null }, `תקופה ${parsePeriod(f)?.label ?? f} ${parsePeriod(f)?.year ?? ''}`)));
+  const canRead = state.token && (state.scopes ?? '').includes(GMAIL_SCOPE);
+  const start = () => {
+    if (canRead) { searchGmail(period); return; }
+    state.afterSignIn = () => searchGmail(period);
+    signIn(GMAIL_SCOPE);
+  };
+  const head = card(null, h('div', { class: 'toolbar' }, h('label', { class: 'muted' }, 'תקופה: '), select,
+    h('button', { class: 'primary', disabled: g.busy || null, onclick: start }, g.result && g.period === period ? 'חפש שוב' : 'חפש חשבוניות במייל')),
+  h('p', { class: 'note' }, 'מיילים שהתקבלו בחודשי התקופה ומזכירים חשבונית: קבצים מצורפים, וגם חשבוניות שנשלחו כקישור להורדה. הגישה למייל היא לקריאה בלבד.'),
+  !canRead ? h('p', { class: 'note' }, 'בפעם הראשונה Google תבקש לאשר לאתר לקרוא את המייל. אם יופיע מסך שהאפליקציה לא אומתה, זה תקין: לוחצים "המשך".') : null,
+  g.busy ? h('div', { class: 'toolbar' }, h('div', { class: 'spinner small' }), h('span', {}, g.progress?.[1] ? `קורא מיילים… ${g.progress[0]} מתוך ${g.progress[1]}` : 'מחפש במייל…')) : null,
+  g.error ? h('p', { class: 'error' }, g.error) : null);
+  if (!g.result || g.period !== period) return page('invoices', 'ייבוא חשבוניות מהמייל', null, null, head);
+
+  const items = g.result.items;
+  const fresh = items.filter((i) => i.bytes && !i.exists && !i.locked);
+  const exists = items.filter((i) => i.exists);
+  const locked = items.filter((i) => i.locked && !i.exists);
+  const linkOnly = items.filter((i) => i.linkOnly);
+  const row = (i, check) => h('label', { class: 'row pick' },
+    check ? h('input', { type: 'checkbox', checked: g.picked.has(i) || null, onchange: (e) => { e.target.checked ? g.picked.add(i) : g.picked.delete(i); render(); } }) : null,
+    h('div', { class: 'row-main' }, h('div', { class: 'row-title' }, i.linkOnly ? i.name : ltr(i.name)),
+      h('div', { class: 'muted' }, [new Date(i.received).toLocaleDateString('he-IL'), i.from.replace(/<.*>/, '').replace(/"/g, '').trim(), i.subject].filter(Boolean).join(' · '))),
+    i.link && !i.linkOnly ? pill('מקישור', 'info') : null,
+    i.linkOnly ? h('a', { class: 'text', href: i.link, target: '_blank', rel: 'noopener noreferrer' }, 'פתח קישור ↗') : null);
+  const section = (title, list, tone, check, explain) => list.length ? card(null, h('div', { class: 'period-head' }, h('h2', {}, title), pill(String(list.length), tone)),
+    explain ? h('p', { class: 'note' }, explain) : null, list.map((i) => row(i, check))) : null;
+  const doImport = () => {
+    const files = [...g.picked].map((i) => new File([i.bytes], i.name, { type: i.type }));
+    g.result = null;
+    location.hash = `#/upload?period=${period}`;
+    uploadFiles(files, period);
+  };
+  return page('invoices', 'ייבוא חשבוניות מהמייל', null, null, head,
+    h('section', { class: 'card hero' },
+      h('div', { class: 'big' }, fresh.length ? `${fresh.length} חשבוניות חדשות` : 'אין חשבוניות חדשות'),
+      h('div', { class: 'muted' }, [`${exists.length} כבר ב-Drive`, locked.length ? `${locked.length} מוגנות בסיסמה` : null, linkOnly.length ? `${linkOnly.length} קישורים שלא ירדו` : null,
+        g.result.ignored ? `${g.result.ignored} קבצים אחרים דולגו (לוגו, כפולות, תעודות משלוח)` : null].filter(Boolean).join(' · ')),
+      fresh.length ? h('div', { class: 'toolbar' }, h('button', { class: 'primary', disabled: !g.picked.size || null, onclick: doImport }, `העלה ${g.picked.size} חשבוניות לתקופה`)) : null),
+    section('חדשות', fresh, 'success', true),
+    section('מוגנות בסיסמה', locked, 'warning', false, 'קובץ PDF עם סיסמה: יש לייבא אותו מהטלפון, ששומר את הסיסמאות ופותח אותן.'),
+    section('קישורים שלא הצלחתי להוריד', linkOnly, 'warning', false, 'המייל מפנה להורדה באתר של הספק, והקובץ לא ירד אוטומטית. פתח את הקישור, הורד את החשבונית והעלה אותה בהעלאה מהמחשב.'),
+    section('כבר ב-Drive', exists, 'neutral', false));
+}
+
 // --- router ---------------------------------------------------------------------------------
 function render() {
   if (!state.data) { show(welcome()); return; }
@@ -683,6 +779,7 @@ function render() {
     if (parts[0] === 'period') view = periodView(parts[1]);
     else if (parts[0] === 'doc') view = docView(+parts[1]);
     else if (parts[0] === 'card') view = cardView(parts[1]);
+    else if (parts[0] === 'gmail') view = gmailView(new URLSearchParams(query ?? '').get('period'));
     else if (parts[0] === 'upload') view = uploadView(new URLSearchParams(query ?? '').get('period'));
     else if (parts[0] === 'products') view = productsView(new URLSearchParams(query ?? '').get('q') ?? '');
     else if (parts[0] === 'supplier') view = supplierView(+parts[1]);

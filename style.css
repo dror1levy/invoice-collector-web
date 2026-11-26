@@ -161,3 +161,8 @@ details > summary > :first-child { flex: 1; }
 .big-amount { font-size: 18px; }
 .payment .row.sub { padding-inline-start: 10px; }
 .top nav { flex-wrap: wrap; }
+.row.pick { cursor: pointer; justify-content: flex-start; }
+.row.pick .row-main { flex: 1; }
+.row.pick input { width: 18px; height: 18px; accent-color: var(--primary); }
+.spinner.small { width: 18px; height: 18px; border-width: 3px; }
+button.primary:disabled { opacity: .5; cursor: default; }
