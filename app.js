@@ -1,14 +1,14 @@
 // The desktop web view of the app: reads the phone's database backup from Google Drive (view
 // only) and shows the periods, invoices and the suppliers & products dashboard.
-import { CONFIG } from './config.js?v=12';
-import { Data } from './data.js?v=12';
-import { timeChart } from './charts.js?v=12';
-import { account, matchAll, merge, parseStatement } from './card.js?v=12';
-import { EXTRA_DAYS, GMAIL_SCOPE, findInvoices, periodEnd } from './gmail.js?v=12';
+import { CONFIG } from './config.js?v=13';
+import { Data } from './data.js?v=13';
+import { timeChart } from './charts.js?v=13';
+import { account, matchAll, merge, parseStatement } from './card.js?v=13';
+import { EXTRA_DAYS, GMAIL_SCOPE, findInvoices, periodEnd } from './gmail.js?v=13';
 import {
   ALL_KINDS, EXCLUDED, FIXED, OCCASIONAL, PRODUCTS, RUNNING, cumulative, displayDate, displayPeriod, parsePeriod,
   normalizeTaxId, quantityByMonth, sameDayTogether, sameName, withVat,
-} from './logic.js?v=12';
+} from './logic.js?v=13';
 
 const SQL_JS = 'https://cdn.jsdelivr.net/npm/sql.js@1.10.3/dist/';
 const DRIVE = 'https://www.googleapis.com/drive/v3/files';
@@ -253,7 +253,7 @@ function periodView(folder) {
     h('div', { class: 'row-main' }, h('div', { class: 'row-title' }, d.supplier_name ?? ltr(d.file_name)),
       h('div', { class: 'muted' }, [d.invoice_date ? displayDate(d.invoice_date) : null, d.invoice_number ? '#' + d.invoice_number : null].filter(Boolean).join(' · '))),
     h('div', { class: 'row-end' }, h('div', { class: 'amount' }, money(d.total)),
-      d.invoice_id != null && !['not_invoice', 'duplicate'].includes(d.status) ? kindPill(d.group) : pill(STATUS[d.status] ?? d.status)));
+      commandPill(d.drive_file_id) ?? (d.invoice_id != null && !['not_invoice', 'duplicate'].includes(d.status) ? kindPill(d.group) : pill(STATUS[d.status] ?? d.status))));
   const section = (title, list, tone, grouped) => list.length ? h('details', { class: 'card section', open: tone === 'danger' },
     h('summary', {}, h('span', {}, title), pill(String(list.length), tone ?? 'neutral')),
     grouped
@@ -311,7 +311,101 @@ function docView(id) {
         field('סה״כ', d.total != null ? money(d.total) : null), field('קבוצה', d.group ? `${d.group.title} (${KIND_LABEL[d.group.kind]})` : d.invoice_id != null ? 'לא משויך' : null),
         d.issues.length ? field('הערות', d.issues.map(issueText).join(' · ')) : null, field('קובץ', ltr(d.file_name)),
         h('a', { class: 'text', href: `https://drive.google.com/file/d/${d.drive_file_id}/view`, target: '_blank', rel: 'noopener' }, 'פתח ב-Drive ↗')),
+      reviewCard(d.drive_file_id, storedExtraction(d), d.group_id ?? null, ['needs_review', 'failed'].includes(d.status)),
       lines)));
+}
+
+/** The reading as stored, with the fields as they are now (the owner may have corrected them). */
+function storedExtraction(d) {
+  let raw = {};
+  try { raw = JSON.parse(d.raw_extraction ?? '{}') ?? {}; } catch { /* none */ }
+  return { ...raw, is_invoice: d.status !== 'not_invoice', supplier_name: d.supplier_name ?? raw.supplier_name ?? null, supplier_tax_id: d.supplier_tax_id ?? raw.supplier_tax_id ?? null,
+    doc_type: d.doc_type ?? raw.doc_type ?? 'tax_invoice', invoice_number: d.invoice_number ?? raw.invoice_number ?? null, invoice_date: d.invoice_date ?? raw.invoice_date ?? null,
+    amount_before_vat: d.amount_before_vat ?? raw.amount_before_vat ?? null, vat_amount: d.vat_amount ?? raw.vat_amount ?? null, total: d.total ?? raw.total ?? null };
+}
+
+// --- approving from the web page: requests left in Drive, applied by the phone ---------------
+state.commands = new Map(); // drive file id -> {id, action}
+const ACTION_LABEL = { confirm: 'אושרה', not_invoice: 'סומנה כלא חשבונית מס', duplicate: 'סומנה ככפולה' };
+
+function commandPill(fileId) {
+  const c = state.commands.get(fileId);
+  return c ? pill(`${ACTION_LABEL[c.action] ?? c.action}, ממתין לטלפון`, 'info') : null;
+}
+
+async function sendCommand(fileId, action, fields, group) {
+  const old = state.commands.get(fileId);
+  if (old) await fetch(`${DRIVE}/${old.id}`, { method: 'PATCH', headers: { Authorization: 'Bearer ' + state.token, 'Content-Type': 'application/json' }, body: JSON.stringify({ trashed: true }) });
+  const target = await folder('פקודות', await folder('גיבוי', await folder('חשבוניות', 'root')));
+  const command = { file: fileId, action, createdAt: new Date().toISOString(), ...(fields ? { fields } : {}), ...(group !== undefined ? { group } : {}) };
+  const form = new FormData();
+  form.append('metadata', new Blob([JSON.stringify({ name: `${fileId}.json`, parents: [target], appProperties: { role: 'command', file: fileId } })], { type: 'application/json' }));
+  form.append('file', new Blob([JSON.stringify(command)], { type: 'application/json' }));
+  const r = await fetch(`${UPLOAD_API}?uploadType=multipart&fields=id`, { method: 'POST', headers: { Authorization: 'Bearer ' + state.token }, body: form });
+  if (!r.ok) throw new Error(`Drive ${r.status}`);
+  state.commands.set(fileId, { id: (await r.json()).id, action });
+  render();
+}
+
+async function cancelCommand(fileId) {
+  const c = state.commands.get(fileId);
+  if (!c) return;
+  await fetch(`${DRIVE}/${c.id}`, { method: 'PATCH', headers: { Authorization: 'Bearer ' + state.token, 'Content-Type': 'application/json' }, body: JSON.stringify({ trashed: true }) });
+  state.commands.delete(fileId);
+  render();
+}
+
+/** The review form: the fields the phone's review screen edits, the group, and the three decisions. */
+function reviewCard(fileId, e, groupId, open) {
+  if (!state.token) return card('בדיקה ואישור', h('p', { class: 'muted' }, 'כדי לאשר מכאן צריך להתחבר עם Google (כפתור "רענן" למעלה).'));
+  const pending = state.commands.get(fileId);
+  const input = (label, key, type = 'text', extra = {}) => h('label', { class: 'form-row' }, h('span', { class: 'muted' }, label),
+    h('input', { class: 'search', type, name: key, value: e[key] ?? '', ...extra }));
+  const docType = h('label', { class: 'form-row' }, h('span', { class: 'muted' }, 'סוג מסמך'),
+    h('select', { class: 'select', name: 'doc_type' }, Object.entries(DOC_TYPE).map(([k, v]) => h('option', { value: k, selected: (e.doc_type ?? 'tax_invoice') === k || null }, v))));
+  const group = h('label', { class: 'form-row' }, h('span', { class: 'muted' }, 'קבוצה'),
+    h('select', { class: 'select', name: 'group' }, h('option', { value: '' }, 'לפי הכללים (אוטומטי)'),
+      state.data.groups.map((g) => h('option', { value: g.id, selected: groupId === g.id || null }, `${g.title} (${KIND_LABEL[g.kind] ?? g.kind})`))));
+  const form = h('form', { class: 'review-form', onsubmit: (ev) => ev.preventDefault() },
+    input('ספק', 'supplier_name'), input('ח.פ / עוסק', 'supplier_tax_id', 'text', { dir: 'ltr' }), docType, input('מספר חשבונית', 'invoice_number', 'text', { dir: 'ltr' }),
+    input('תאריך', 'invoice_date', 'date'), input('לפני מע״מ', 'amount_before_vat', 'number', { step: '0.01', dir: 'ltr' }),
+    input('מע״מ', 'vat_amount', 'number', { step: '0.01', dir: 'ltr' }), input('סה״כ', 'total', 'number', { step: '0.01', dir: 'ltr' }), group);
+  const values = () => {
+    const f = new FormData(form), num = (k) => (f.get(k) === '' ? null : Number(f.get(k))), txt = (k) => String(f.get(k) ?? '').trim() || null;
+    return { is_invoice: true, supplier_name: txt('supplier_name'), supplier_tax_id: txt('supplier_tax_id'), doc_type: f.get('doc_type'), invoice_number: txt('invoice_number'),
+      invoice_date: txt('invoice_date'), amount_before_vat: num('amount_before_vat'), vat_amount: num('vat_amount'), total: num('total') };
+  };
+  const msg = h('p', { class: 'note' });
+  const act = (action) => async () => {
+    msg.textContent = 'שומר…';
+    try {
+      const groupValue = form.querySelector('[name=group]').value;
+      const changedGroup = String(groupId ?? '') !== groupValue;
+      await sendCommand(fileId, action, action === 'confirm' ? values() : null, action === 'confirm' && changedGroup ? (groupValue ? +groupValue : null) : undefined);
+    } catch (err) { msg.textContent = 'השמירה נכשלה: ' + err.message; }
+  };
+  return h('details', { class: 'card section', open: open || pending || null },
+    h('summary', {}, h('span', {}, 'בדיקה ואישור'), pending ? commandPill(fileId) : null),
+    pending ? h('div', { class: 'toolbar' }, h('span', { class: 'muted' }, 'ההחלטה תבוצע כשהאפליקציה בטלפון תיפתח.'),
+      h('button', { class: 'text', onclick: () => cancelCommand(fileId) }, 'בטל')) : null,
+    form,
+    h('div', { class: 'toolbar' },
+      h('button', { class: 'primary', onclick: act('confirm') }, 'אשר ושמור'),
+      h('button', { class: 'button tonal', onclick: act('not_invoice') }, 'לא חשבונית מס'),
+      h('button', { class: 'button tonal', onclick: act('duplicate') }, 'כפולה')),
+    h('p', { class: 'note' }, 'הבדיקות של הטלפון רצות גם כאן: חשבונית שכבר קיימת עם אותו ספק, מספר וסכום תסומן ככפולה גם אם תאשר.'), msg);
+}
+
+/** A file uploaded from the web page that the phone hasn't taken yet: its server reading, to approve. */
+function pendingFileView(fileId) {
+  const f = state.pending?.files.find((x) => x.id === fileId);
+  if (!f) return page('invoices', 'הקובץ לא נמצא', 'ייתכן שהטלפון כבר קרא אותו: חפש אותו בתקופה.', null);
+  const e = state.pending.readings.get(fileId)?.extraction;
+  const preview = h('div', { class: 'preview' }, h('p', { class: 'muted' }, 'טוען את הקובץ…'));
+  loadPreview({ drive_file_id: f.id, mime_type: f.mimeType, file_name: f.name }, preview);
+  return page('invoices', e?.supplier_name ?? f.name, `ממתין לטלפון · תקופה ${parsePeriod(f.appProperties?.period)?.label ?? ''}`, null,
+    h('div', { class: 'split' }, preview, h('div', {},
+      e ? reviewCard(f.id, e, null, true) : card(null, h('p', { class: 'muted' }, 'הקובץ עוד לא נקרא.'), readingLine(f.id)))));
 }
 
 async function loadPreview(d, box) {
@@ -924,6 +1018,11 @@ async function loadPending() {
       try { readings.set(f.appProperties.file, await (await drive(`${DRIVE}/${f.id}?alt=media`)).json()); } catch { /* skip */ }
     }));
     state.pending = { files, readings };
+    const commands = await driveList("appProperties has { key='role' and value='command' } and trashed=false", 'id,appProperties');
+    state.commands = new Map();
+    await Promise.all(commands.map(async (c) => {
+      try { const o = await (await drive(`${DRIVE}/${c.id}?alt=media`)).json(); state.commands.set(o.file, { id: c.id, action: o.action }); } catch { /* skip */ }
+    }));
     render();
   } catch (e) {
     console.warn('pending', e);
@@ -1013,7 +1112,8 @@ function pendingCard(folder) {
     unread.length && CONFIG.reader ? h('div', { class: 'toolbar' }, h('button', { class: 'button tonal', onclick: () => readPending(unread.map((f) => f.id)) }, `קרא עכשיו (${unread.length})`)) : null,
     files.map((f) => h('div', { class: 'row' },
       h('div', { class: 'row-main' }, h('div', { class: 'row-title' }, ltr(f.name)), readingLine(f.id)),
-      h('a', { class: 'text', href: `https://drive.google.com/file/d/${f.id}/view`, target: '_blank', rel: 'noopener' }, 'פתח ↗'))));
+      commandPill(f.id),
+      h('a', { class: 'text', href: `#/pending/${f.id}` }, state.pending.readings.has(f.id) ? 'בדוק ואשר' : 'פתח'))));
 }
 
 // --- router ---------------------------------------------------------------------------------
@@ -1025,6 +1125,7 @@ function render() {
   try {
     if (parts[0] === 'period') view = periodView(parts[1]);
     else if (parts[0] === 'doc') view = docView(+parts[1]);
+    else if (parts[0] === 'pending') view = pendingFileView(parts[1]);
     else if (parts[0] === 'card') view = cardView(parts[1]);
     else if (parts[0] === 'gmail') view = gmailView(new URLSearchParams(query ?? '').get('period'));
     else if (parts[0] === 'upload') view = uploadView(new URLSearchParams(query ?? '').get('period'));
@@ -1053,7 +1154,7 @@ function watchHead() {
 window.addEventListener('hashchange', () => { render(); window.scrollTo(0, 0); });
 // Local testing only: http://localhost:<port>/?dev opens a copy of the database next to the page.
 if (['localhost', '127.0.0.1'].includes(location.hostname) && new URLSearchParams(location.search).has('dev')) {
-  window.__dev = { alreadyHave, periodFor, isTaxDoc }; // local testing only
+  window.__dev = { alreadyHave, periodFor, isTaxDoc, state, render }; // local testing only
   // The copy's own time (not "now"), so an old copy doesn't look up to date.
   fetch('dev.db', { cache: 'no-store' }).then(async (r) => {
     const time = new Date(r.headers.get('Last-Modified') ?? Date.now()).toISOString();
