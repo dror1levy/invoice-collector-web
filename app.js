@@ -1,14 +1,14 @@
 // The desktop web view of the app: reads the phone's database backup from Google Drive (view
 // only) and shows the periods, invoices and the suppliers & products dashboard.
-import { CONFIG } from './config.js?v=9';
-import { Data } from './data.js?v=9';
-import { timeChart } from './charts.js?v=9';
-import { account, matchAll, merge, parseStatement } from './card.js?v=9';
-import { EXTRA_DAYS, GMAIL_SCOPE, findInvoices, periodEnd } from './gmail.js?v=9';
+import { CONFIG } from './config.js?v=10';
+import { Data } from './data.js?v=10';
+import { timeChart } from './charts.js?v=10';
+import { account, matchAll, merge, parseStatement } from './card.js?v=10';
+import { EXTRA_DAYS, GMAIL_SCOPE, findInvoices, periodEnd } from './gmail.js?v=10';
 import {
   ALL_KINDS, EXCLUDED, FIXED, OCCASIONAL, PRODUCTS, RUNNING, cumulative, displayDate, displayPeriod, parsePeriod,
   quantityByMonth, sameDayTogether, withVat,
-} from './logic.js?v=9';
+} from './logic.js?v=10';
 
 const SQL_JS = 'https://cdn.jsdelivr.net/npm/sql.js@1.10.3/dist/';
 const DRIVE = 'https://www.googleapis.com/drive/v3/files';
@@ -42,6 +42,15 @@ const KIND_TONE = { [FIXED]: 'info', [PRODUCTS]: 'success', [RUNNING]: 'primary'
 const STATUS = { pending: 'ממתין', extracted: 'נקרא', needs_review: 'לבדיקה', confirmed: 'אושר', not_invoice: 'לא חשבונית מס', failed: 'נכשל', duplicate: 'כפולה (נמחקה)' };
 const DOC_TYPE = { tax_invoice: 'חשבונית מס', tax_invoice_receipt: 'חשבונית מס קבלה', receipt: 'קבלה', credit_note: 'חשבונית זיכוי', other: 'אחר' };
 
+const ISSUE = {
+  missing_supplier: 'חסר ספק', missing_date: 'חסר תאריך', missing_total: 'חסר סכום', vat_sum_mismatch: 'הסכומים לא מסתדרים עם המע״מ',
+  vat_rate_unexpected: 'שיעור מע״מ לא צפוי', lines_sum_mismatch: 'סכום השורות לא תואם לסה״כ', tax_id_invalid: 'מספר עוסק לא תקין',
+  date_outside_period: 'התאריך לא בתוך התקופה', duplicate_invoice: 'חשבונית עם אותו מספר מאותו ספק כבר קיימת', foreign_currency: 'מטבע חוץ',
+  not_reported_before: 'חשבונית מתקופה אחרת שלא דווחה בתקופות קודמות',
+};
+const issueText = (code) => code.startsWith('reported_in:')
+  ? `כבר דווחה בתקופה ${parsePeriod(code.slice(12))?.label ?? code.slice(12)} ${parsePeriod(code.slice(12))?.year ?? ''}, ולכן לא נכללת בדוח הזה`
+  : ISSUE[code] ?? code;
 const pill = (text, tone = 'neutral') => h('span', { class: `pill ${tone}` }, text);
 const kindPill = (g) => pill(g ? KIND_LABEL[g.kind] ?? g.kind : 'לא משויך', g ? KIND_TONE[g.kind] : 'warning');
 const card = (title, ...body) => h('section', { class: 'card' }, title ? h('h2', {}, title) : null, ...body);
@@ -300,7 +309,7 @@ function docView(id) {
         field('מספר', d.invoice_number && ltr(d.invoice_number)), field('תאריך', displayDate(d.invoice_date)), field('תקופת חשבון', billing(d)),
         field('תיאור', d.description), field('לפני מע״מ', d.amount_before_vat != null ? money(d.amount_before_vat) : null), field('מע״מ', d.vat_amount != null ? money(d.vat_amount) : null),
         field('סה״כ', d.total != null ? money(d.total) : null), field('קבוצה', d.group ? `${d.group.title} (${KIND_LABEL[d.group.kind]})` : d.invoice_id != null ? 'לא משויך' : null),
-        d.issues.length ? field('לבדיקה', d.issues.join(', ')) : null, field('קובץ', ltr(d.file_name)),
+        d.issues.length ? field('הערות', d.issues.map(issueText).join(' · ')) : null, field('קובץ', ltr(d.file_name)),
         h('a', { class: 'text', href: `https://drive.google.com/file/d/${d.drive_file_id}/view`, target: '_blank', rel: 'noopener' }, 'פתח ב-Drive ↗')),
       lines)));
 }
