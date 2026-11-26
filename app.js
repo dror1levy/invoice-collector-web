@@ -1,14 +1,14 @@
 // The desktop web view of the app: reads the phone's database backup from Google Drive (view
 // only) and shows the periods, invoices and the suppliers & products dashboard.
-import { CONFIG } from './config.js?v=6';
-import { Data } from './data.js?v=6';
-import { timeChart } from './charts.js?v=6';
-import { account, matchAll, merge, parseStatement } from './card.js?v=6';
-import { GMAIL_SCOPE, findInvoices } from './gmail.js?v=6';
+import { CONFIG } from './config.js?v=7';
+import { Data } from './data.js?v=7';
+import { timeChart } from './charts.js?v=7';
+import { account, matchAll, merge, parseStatement } from './card.js?v=7';
+import { GMAIL_SCOPE, findInvoices } from './gmail.js?v=7';
 import {
   ALL_KINDS, EXCLUDED, FIXED, OCCASIONAL, PRODUCTS, RUNNING, cumulative, displayDate, displayPeriod, parsePeriod,
   quantityByMonth, sameDayTogether, withVat,
-} from './logic.js?v=6';
+} from './logic.js?v=7';
 
 const SQL_JS = 'https://cdn.jsdelivr.net/npm/sql.js@1.10.3/dist/';
 const DRIVE = 'https://www.googleapis.com/drive/v3/files';
@@ -157,6 +157,7 @@ async function loadFromDrive() {
     const bytes = new Uint8Array(await (await drive(`${DRIVE}/${file.id}?alt=media`)).arrayBuffer());
     await cache.put(bytes, file.modifiedTime);
     await open(bytes, 'drive', file.modifiedTime);
+    loadPending();
   } catch (e) {
     show(errorView(String(e.message ?? e)));
   }
@@ -226,13 +227,18 @@ function homeView() {
         p.review ? pill(`${p.review} לבדיקה`, 'danger') : null,
         p.missingFixed ? pill(`${p.missingFixed} קבועות חסרות`, 'warning') : pill('הקבועות מלאות', 'success'),
         p.unassigned ? pill(`${p.unassigned} לא משויכות`, 'warning') : null,
-        p.pending ? pill(`${p.pending} ממתינות`, 'info') : null)))));
+        p.pending ? pill(`${p.pending} ממתינות`, 'info') : null,
+        pendingIn(p.folder_name).length ? pill(`${pendingIn(p.folder_name).length} הועלו, ממתינות לטלפון`, 'info') : null)))),
+    newPendingPeriods(periods));
 }
 
 // One period.
 function periodView(folder) {
   const p = state.data.periods().find((x) => x.folder_name === folder);
-  if (!p) return page('invoices', 'התקופה לא נמצאה', null, null);
+  if (!p) {
+    const waiting = pendingCard(folder);
+    return waiting ? page('invoices', `תקופה ${parsePeriod(folder)?.label ?? folder}`, String(parsePeriod(folder)?.year ?? ''), null, waiting) : page('invoices', 'התקופה לא נמצאה', null, null);
+  }
   const docs = p.documents;
   const row = (d) => h('a', { class: 'row', href: `#/doc/${d.id}` },
     h('div', { class: 'row-main' }, h('div', { class: 'row-title' }, d.supplier_name ?? ltr(d.file_name)),
@@ -268,6 +274,7 @@ function periodView(folder) {
       h('a', { class: 'button tonal', href: `#/gmail?period=${folder}` }, '✉ ייבוא מהמייל'),
       h('a', { class: 'button tonal', href: `#/card/${folder}` }, 'הצלבה מול כרטיס אשראי'),
       h('button', { class: 'button tonal', onclick: () => exportPeriod(p) }, '⬇ ייצוא ל-Excel')),
+    pendingCard(folder),
     fixed,
     section('לבדיקה', docs.filter((d) => d.status === 'needs_review' || d.status === 'failed'), 'danger'),
     section('נקראו', docs.filter((d) => d.status === 'extracted' || d.status === 'confirmed'), 'neutral', true),
@@ -601,7 +608,8 @@ function uploadView(chosen) {
     ondrop: (e) => { e.preventDefault(); e.currentTarget.classList.remove('over'); uploadFiles([...e.dataTransfer.files], select.value); } },
   h('strong', {}, 'גרור לכאן חשבוניות (PDF או תמונה), או לחץ לבחירה'), h('span', { class: 'muted' }, 'הקבצים עולים לתיקיית התקופה ב-Drive.'), input);
   const list = state.uploads.length ? card('קבצים', state.uploads.map((u) => h('div', { class: 'row' },
-    h('div', { class: 'row-main' }, h('div', { class: 'row-title' }, ltr(u.file.name)), u.name ? h('div', { class: 'muted' }, 'נשמר בשם ', ltr(u.name)) : null),
+    h('div', { class: 'row-main' }, h('div', { class: 'row-title' }, ltr(u.file.name)), u.name ? h('div', { class: 'muted' }, 'נשמר בשם ', ltr(u.name)) : null,
+      u.fileId ? readingLine(u.fileId) : null),
     pill(u.status, u.tone)))) : null;
   return page('invoices', 'העלאת חשבוניות', null, null,
     card(null, h('div', { class: 'toolbar' }, h('label', { class: 'muted' }, 'לתקופה: '), select), drop,
@@ -671,8 +679,12 @@ async function uploadFiles(files, periodKey) {
       const r = await fetch(`${UPLOAD_API}?uploadType=multipart&fields=id`, { method: 'POST', headers: { Authorization: 'Bearer ' + state.token }, body });
       if (!r.ok) { set(u, `שגיאה (${r.status})`, 'danger'); continue; }
       hashes.add(hash);
+      u.fileId = (await r.json()).id;
       set(u, 'הועלה', 'success', name);
     }
+    // Read them right away (the phone uses these readings instead of reading again).
+    const uploaded = items.filter((u) => u.fileId).map((u) => u.fileId);
+    if (uploaded.length) { await loadPending(); readPending(uploaded); }
   } catch (e) {
     items.filter((u) => ['ממתין', 'מעלה…'].includes(u.status)).forEach((u) => { u.status = 'שגיאה'; u.tone = 'danger'; });
     alertBox('ההעלאה נכשלה: ' + e.message);
@@ -767,6 +779,85 @@ function gmailView(chosen) {
     section('מוגנות בסיסמה', locked, 'warning', false, 'קובץ PDF עם סיסמה: יש לייבא אותו מהטלפון, ששומר את הסיסמאות ופותח אותן.'),
     section('קישורים שלא הצלחתי להוריד', linkOnly, 'warning', false, 'המייל מפנה להורדה באתר של הספק, והקובץ לא ירד אוטומטית. פתח את הקישור, הורד את החשבונית והעלה אותה בהעלאה מהמחשב.'),
     section('כבר ב-Drive', exists, 'neutral', false));
+}
+
+// --- files uploaded but not yet read by the phone, and reading them on the server -------------
+state.pending = null;          // {files, readings: Map(fileId -> reading)}
+state.reading = new Map();     // fileId -> 'busy' | error text
+
+async function loadPending() {
+  if (!state.token || !state.data) return;
+  try {
+    const known = new Set(state.data.documents().map((d) => d.drive_file_id));
+    const files = (await driveList("appProperties has { key='app' and value='invoice-collector' } and trashed=false", 'id,name,mimeType,appProperties,createdTime'))
+      .filter((f) => !known.has(f.id));
+    const ids = new Set(files.map((f) => f.id));
+    const sidecars = (await driveList("appProperties has { key='role' and value='reading' } and trashed=false", 'id,appProperties'))
+      .filter((f) => ids.has(f.appProperties?.file));
+    const readings = new Map(state.pending?.readings ?? []);
+    await Promise.all(sidecars.filter((f) => !readings.has(f.appProperties.file)).map(async (f) => {
+      try { readings.set(f.appProperties.file, await (await drive(`${DRIVE}/${f.id}?alt=media`)).json()); } catch { /* skip */ }
+    }));
+    state.pending = { files, readings };
+    render();
+  } catch (e) {
+    console.warn('pending', e);
+  }
+}
+
+const pendingIn = (folder) => (state.pending?.files ?? []).filter((f) => f.appProperties?.period === folder);
+
+/** Periods that only exist in Drive so far (files uploaded for a new period). */
+function newPendingPeriods(periods) {
+  const known = new Set(periods.map((p) => p.folder_name));
+  const extra = [...new Set((state.pending?.files ?? []).map((f) => f.appProperties?.period).filter((k) => k && !known.has(k)))];
+  return extra.length ? h('div', { class: 'grid' }, extra.map((k) => h('a', { class: 'card link', href: `#/period/${k}` },
+    h('div', { class: 'period-head' }, h('h2', {}, ltr(parsePeriod(k)?.label ?? k)), h('span', { class: 'muted' }, parsePeriod(k)?.year ?? '')),
+    h('div', { class: 'pills' }, pill(`${pendingIn(k).length} הועלו, ממתינות לטלפון`, 'info'))))) : null;
+}
+
+async function readPending(ids) {
+  if (!CONFIG.reader || !state.token) return;
+  const queue = ids.filter((id) => !state.pending?.readings.has(id) && state.reading.get(id) !== 'busy');
+  queue.forEach((id) => state.reading.set(id, 'busy'));
+  render();
+  const one = async (id) => {
+    try {
+      const r = await fetch(CONFIG.reader, { method: 'POST', headers: { Authorization: 'Bearer ' + state.token, 'Content-Type': 'application/json' }, body: JSON.stringify({ fileId: id }) });
+      const body = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(body.error ?? `שגיאה ${r.status}`);
+      state.pending?.readings.set(id, body);
+      state.reading.delete(id);
+    } catch (e) {
+      state.reading.set(id, 'הקריאה נכשלה: ' + e.message);
+    }
+    render();
+  };
+  await Promise.all(Array.from({ length: 2 }, async () => { while (queue.length) await one(queue.shift()); }));
+}
+
+/** What the server read from a file, in one line; or its reading status. */
+function readingLine(id) {
+  const r = state.pending?.readings.get(id);
+  const status = state.reading.get(id);
+  if (!r) return status === 'busy' ? h('div', { class: 'muted' }, 'קורא עם Gemini…') : status ? h('div', { class: 'error' }, status) : null;
+  const e = r.extraction ?? {};
+  return h('div', { class: 'reading' },
+    e.is_invoice === false ? pill('לא חשבונית מס', 'warning') : pill(DOC_TYPE[e.doc_type] ?? 'נקרא', 'success'),
+    h('span', {}, [e.supplier_name, displayDate(e.invoice_date), e.total != null ? money(e.total) : null, e.description].filter(Boolean).join(' · ')));
+}
+
+function pendingCard(folder) {
+  const files = pendingIn(folder);
+  if (!files.length) return null;
+  const unread = files.filter((f) => !state.pending.readings.has(f.id) && state.reading.get(f.id) !== 'busy');
+  return h('section', { class: 'card' },
+    h('div', { class: 'period-head' }, h('h2', {}, 'הועלו וממתינות לטלפון'), pill(String(files.length), 'info')),
+    h('p', { class: 'note' }, 'הקבצים כבר ב-Drive. הקריאה כאן מוצגת מיד, והטלפון ישתמש בה כשהאפליקציה תיפתח (בלי לקרוא שוב). אישור של חשבונית לבדיקה נעשה בטלפון.'),
+    unread.length && CONFIG.reader ? h('div', { class: 'toolbar' }, h('button', { class: 'button tonal', onclick: () => readPending(unread.map((f) => f.id)) }, `קרא עכשיו (${unread.length})`)) : null,
+    files.map((f) => h('div', { class: 'row' },
+      h('div', { class: 'row-main' }, h('div', { class: 'row-title' }, ltr(f.name)), readingLine(f.id)),
+      h('a', { class: 'text', href: `https://drive.google.com/file/d/${f.id}/view`, target: '_blank', rel: 'noopener' }, 'פתח ↗'))));
 }
 
 // --- router ---------------------------------------------------------------------------------
