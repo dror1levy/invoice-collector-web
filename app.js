@@ -1,14 +1,14 @@
 // The desktop web view of the app: reads the phone's database backup from Google Drive (view
 // only) and shows the periods, invoices and the suppliers & products dashboard.
-import { CONFIG } from './config.js?v=13';
-import { Data } from './data.js?v=13';
-import { timeChart } from './charts.js?v=13';
-import { account, matchAll, merge, parseStatement } from './card.js?v=13';
-import { EXTRA_DAYS, GMAIL_SCOPE, findInvoices, periodEnd } from './gmail.js?v=13';
+import { CONFIG } from './config.js?v=14';
+import { Data } from './data.js?v=14';
+import { timeChart } from './charts.js?v=14';
+import { account, matchAll, merge, parseStatement } from './card.js?v=14';
+import { EXTRA_DAYS, GMAIL_SCOPE, findInvoices, periodEnd } from './gmail.js?v=14';
 import {
   ALL_KINDS, EXCLUDED, FIXED, OCCASIONAL, PRODUCTS, RUNNING, cumulative, displayDate, displayPeriod, parsePeriod,
   normalizeTaxId, quantityByMonth, sameDayTogether, sameName, withVat,
-} from './logic.js?v=13';
+} from './logic.js?v=14';
 
 const SQL_JS = 'https://cdn.jsdelivr.net/npm/sql.js@1.10.3/dist/';
 const DRIVE = 'https://www.googleapis.com/drive/v3/files';
@@ -241,6 +241,12 @@ function homeView() {
     newPendingPeriods(periods));
 }
 
+/** An invoice dated outside its period, and whether an earlier report of this year has it. */
+function outsidePill(d) {
+  if (!d.issues?.includes('date_outside_period') || ['duplicate', 'not_invoice'].includes(d.status)) return null;
+  return pill(d.issues.includes('not_reported_before') ? 'מחוץ לתקופה · לא דווחה קודם' : 'מחוץ לתקופה', 'warning');
+}
+
 // One period.
 function periodView(folder) {
   const p = state.data.periods().find((x) => x.folder_name === folder);
@@ -252,7 +258,7 @@ function periodView(folder) {
   const row = (d) => h('a', { class: 'row', href: `#/doc/${d.id}` },
     h('div', { class: 'row-main' }, h('div', { class: 'row-title' }, d.supplier_name ?? ltr(d.file_name)),
       h('div', { class: 'muted' }, [d.invoice_date ? displayDate(d.invoice_date) : null, d.invoice_number ? '#' + d.invoice_number : null].filter(Boolean).join(' · '))),
-    h('div', { class: 'row-end' }, h('div', { class: 'amount' }, money(d.total)),
+    h('div', { class: 'row-end' }, h('div', { class: 'amount' }, money(d.total)), outsidePill(d),
       commandPill(d.drive_file_id) ?? (d.invoice_id != null && !['not_invoice', 'duplicate'].includes(d.status) ? kindPill(d.group) : pill(STATUS[d.status] ?? d.status))));
   const section = (title, list, tone, grouped) => list.length ? h('details', { class: 'card section', open: tone === 'danger' },
     h('summary', {}, h('span', {}, title), pill(String(list.length), tone ?? 'neutral')),
@@ -272,7 +278,7 @@ function periodView(folder) {
         !c.linked ? pill('לא משויך ספק', 'warning') : c.complete ? pill(`${c.found} מתוך ${c.item.expectedPerPeriod}`, 'success') : pill(`${c.found} מתוך ${c.item.expectedPerPeriod}`, 'danger')),
       mine.map((d) => h('a', { class: 'row sub', href: `#/doc/${d.id}` },
         h('div', { class: 'row-main' }, ltr(displayPeriod(d.billing_start, d.billing_end) ?? displayDate(d.invoice_date) ?? d.file_name),
-          h('div', { class: 'muted' }, displayPeriod(d.billing_start, d.billing_end) ? 'תקופת חשבון' : 'תאריך חשבונית')),
+          h('div', { class: 'muted' }, displayPeriod(d.billing_start, d.billing_end) ? 'תקופת חשבון' : 'תאריך חשבונית'), outsidePill(d)),
         h('div', { class: 'amount' }, money(d.total)))));
   })));
 
